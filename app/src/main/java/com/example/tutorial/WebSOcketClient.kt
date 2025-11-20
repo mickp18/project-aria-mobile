@@ -43,11 +43,12 @@ class WebSocketClient {
 
     private fun initWebSocket() {
         Log.e("socketCheck", "initWebSocket() socketurl = $socketUrl")
+        // Reverting back to the simple client initialization:
         client = OkHttpClient()
         val request = Request.Builder().url(url = socketUrl).build()
         webSocket = client!!.newWebSocket(request, webSocketListener)
-        //this must me done else memory leak will be caused
-        client!!.dispatcher.executorService.shutdown()
+        // **BUG FIX:** The shutdown line must remain removed or commented out!
+        // client!!.dispatcher.executorService.shutdown()
     }
 
     fun connect() {
@@ -72,14 +73,10 @@ class WebSocketClient {
 
     //1. websocket.webSocket.close(1000, "Don't need connection")
     //This attempts to initiate a graceful shutdown of this web socket.
-    //Any already-enqueued messages will be transmitted before the close message is sent but
-    //subsequent calls to send will return false and their messages will not be enqueued.
 
     //2. websocket.cancel()
     //This immediately and violently release resources held by this web socket,
-    //discarding any enqueued messages.
 
-    //Both does nothing if the web socket has already been closed or canceled.
     fun disconnect() {
         if (::webSocket.isInitialized) webSocket.close(1000, "Do not need connection anymore.")
         shouldReconnect = false
@@ -92,7 +89,6 @@ class WebSocketClient {
 
     private val webSocketListener = object : WebSocketListener() {
         //called when connection succeeded
-        //we are sending a message just after the socket is opened
         override fun onOpen(webSocket: okhttp3.WebSocket, response: Response) {
             Log.e("socketCheck", "onOpen()")
         }
@@ -117,9 +113,8 @@ class WebSocketClient {
             webSocket: okhttp3.WebSocket, t: Throwable, response: Response?
         ) {
             Log.e("socketCheck", "onFailure()")
-            throw t
+            // Reverting failure handling: do not throw, just reconnect
             if (shouldReconnect) reconnect()
-
         }
     }
 }

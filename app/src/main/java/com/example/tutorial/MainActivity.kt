@@ -42,7 +42,7 @@ class MainActivity : AppCompatActivity() {
             // TODO: REPLACE WITH ACTUAL IP ADDRESS OF YOUR DEVICE
             //  webSocketClient.setSocketUrl("ws://10.0.2.2:8080")
             //  webSocketClient.setSocketUrl("ws://10.42.0.1:8080") //10.42.0.1
-            webSocketClient.setSocketUrl("wss://192.168.1.68:8080") //192.168.1.68
+            webSocketClient.setSocketUrl("ws://192.168.1.68:8080") //192.168.1.68
             webSocketClient.setListener(socketListener)
             webSocketClient.connect()
         }
