@@ -117,7 +117,9 @@ class WebSocketClient {
             webSocket: okhttp3.WebSocket, t: Throwable, response: Response?
         ) {
             Log.e("socketCheck", "onFailure()")
+            throw t
             if (shouldReconnect) reconnect()
+
         }
     }
 }
