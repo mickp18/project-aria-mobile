@@ -48,4 +48,11 @@ dependencies {
     androidTestImplementation(libs.androidx.espresso.core)
 
     implementation(libs.okhttp)
+    implementation ("com.google.ai.edge.litert:+")
+    implementation(libs.litert.support)
+    implementation(libs.tensorflow.lite)
+    implementation(libs.tensorflow.lite.support)
+    implementation(libs.tensorflow.lite.gpu)
+// Recommended for speed
+
 }

@@ -29,6 +29,7 @@ class MainActivity : AppCompatActivity() {
             v.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom)
             insets
         }
+        val detector = YoloDetector(this, "assets/yolov11n_int8.tflite", "labels.txt")
 
         startButton = findViewById(R.id.startButton)
         stopButton = findViewById(R.id.stopButton)
@@ -45,11 +46,22 @@ class MainActivity : AppCompatActivity() {
             webSocketClient.setSocketUrl("ws://192.168.1.68:8080") //192.168.1.68
             webSocketClient.setListener(socketListener)
             webSocketClient.connect()
+            webSocketClient.sendMessage(message = "start")
+
+            // 2. Detect (Call this when you have a bitmap, e.g., from CameraX)
+            // val bitmap = ... // Get your bitmap from camera or resources
+           // val result = detector.detect(bitmap)
+
+            // 3. Use results
+            // result.forEach { box ->
+            //    Log.d("YOLO", "Found ${box.label} (${box.conf}) at [${box.x1}, ${box.y1}]")
+            // }
         }
 
         stopButton.setOnClickListener{
             startButton.isEnabled = true
             stopButton.isEnabled = false
+            webSocketClient.sendMessage(message = "stop")
             webSocketClient.disconnect()
 
         }
