@@ -47,12 +47,16 @@ dependencies {
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
 
+    // ViewMOdel
+    implementation(libs.androidx.lifecycle.viewmodel.ktx)
+    implementation(libs.androidx.lifecycle.viewmodel.savedstate)
+    implementation(libs.androidx.lifecycle.runtime.ktx)
+
     implementation(libs.okhttp)
-    implementation ("com.google.ai.edge.litert:+")
-    implementation(libs.litert.support)
-    implementation(libs.tensorflow.lite)
-    implementation(libs.tensorflow.lite.support)
-    implementation(libs.tensorflow.lite.gpu)
-// Recommended for speed
+    // implementation ("com.google.ai.edge.litert:+")
+    //implementation(libs.litert.support)
+    //implementation(libs.tensorflow.lite)
+    //implementation(libs.tensorflow.lite.support)
+    //implementation(libs.tensorflow.lite.gpu)
 
 }

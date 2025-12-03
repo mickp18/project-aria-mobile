@@ -4,25 +4,28 @@ import android.util.Log
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
+import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import okio.ByteString
+import java.util.concurrent.TimeUnit
 
-/*
-* We are making separate webSocketClient where all code related to socket is written and
-* singleton instance of webSocketClient is made so that we can do stuffs with single socket
-* from anywhere in the project
-* */
 class WebSocketClient {
-    private lateinit var webSocket: okhttp3.WebSocket
+    // @Volatile ensures checking 'webSocket' from a background thread
+    // always sees the latest assigned instance.
+    @Volatile private var webSocket: WebSocket? = null
+
     private var socketListener: SocketListener? = null
     private var socketUrl = ""
-    private var shouldReconnect = true
-    private var client: OkHttpClient? = null
+    private var shouldReconnect = false
+
+    private val client: OkHttpClient = OkHttpClient.Builder()
+        .readTimeout(60, TimeUnit.SECONDS) // if timeout reached without any data received, disconnect
+        .build()
 
     companion object {
         private lateinit var instance: WebSocketClient
         @JvmStatic
         @Synchronized
-        //This function gives singleton instance of WebSocket.
         fun getInstance(): WebSocketClient {
             synchronized(WebSocketClient::class) {
                 if (!::instance.isInitialized) {
@@ -43,12 +46,8 @@ class WebSocketClient {
 
     private fun initWebSocket() {
         Log.e("socketCheck", "initWebSocket() socketurl = $socketUrl")
-        // Reverting back to the simple client initialization:
-        client = OkHttpClient()
         val request = Request.Builder().url(url = socketUrl).build()
-        webSocket = client!!.newWebSocket(request, webSocketListener)
-        // **BUG FIX:** The shutdown line must remain removed or commented out!
-        // client!!.dispatcher.executorService.shutdown()
+        webSocket = client.newWebSocket(request, webSocketListener)
     }
 
     fun connect() {
@@ -62,59 +61,76 @@ class WebSocketClient {
         initWebSocket()
     }
 
-    //send
     fun sendMessage(message: String) {
         Log.e("socketCheck", "sendMessage($message)")
-        if (::webSocket.isInitialized) webSocket.send(message)
+        webSocket?.send(message)
     }
 
-
-    //We can close socket by two way:
-
-    //1. websocket.webSocket.close(1000, "Don't need connection")
-    //This attempts to initiate a graceful shutdown of this web socket.
-
-    //2. websocket.cancel()
-    //This immediately and violently release resources held by this web socket,
-
     fun disconnect() {
-        if (::webSocket.isInitialized) webSocket.close(1000, "Do not need connection anymore.")
+        Log.e("socketCheck", "disconnect()")
         shouldReconnect = false
+        webSocket?.close(1000, "User disconnected")
+        webSocket = null
     }
 
     interface SocketListener {
         fun onMessage(message: String)
+        fun onBinaryMessage(bytes: ByteArray) // Added to handle bytes
+        fun onOpen()
     }
 
-
     private val webSocketListener = object : WebSocketListener() {
-        //called when connection succeeded
-        override fun onOpen(webSocket: okhttp3.WebSocket, response: Response) {
-            Log.e("socketCheck", "onOpen()")
+        override fun onOpen(webSocket: WebSocket, response: Response) {
+            // Log.e("socketCheck", "onOpen()")
+            socketListener?.onOpen()
         }
 
-        //called when text message received
-        override fun onMessage(webSocket: okhttp3.WebSocket, text: String) {
+        override fun onMessage(webSocket: WebSocket, text: String) {
             socketListener?.onMessage(text)
         }
 
-        //called when binary message received
-        override fun onClosing(webSocket: okhttp3.WebSocket, code: Int, reason: String) {
+        // Handle incoming binary messages
+        override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+            socketListener?.onBinaryMessage(bytes.toByteArray())
+        }
+
+        override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
             Log.e("socketCheck", "onClosing()")
         }
 
-        override fun onClosed(webSocket: okhttp3.WebSocket, code: Int, reason: String) {
-            //called when no more messages and the connection should be released
+        override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
             Log.e("socketCheck", "onClosed()")
-            if (shouldReconnect) reconnect()
+
+            if (webSocket != this@WebSocketClient.webSocket) {
+                Log.e("socketCheck", "Ignoring onClosed from old socket")
+                return
+            }
+
+            if (shouldReconnect) {
+                waitAndReconnect()
+            }
         }
 
-        override fun onFailure(
-            webSocket: okhttp3.WebSocket, t: Throwable, response: Response?
-        ) {
-            Log.e("socketCheck", "onFailure()")
-            // Reverting failure handling: do not throw, just reconnect
-            if (shouldReconnect) reconnect()
+        override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+            Log.e("socketCheck", "onFailure() : ${t.localizedMessage}")
+
+            if (webSocket != this@WebSocketClient.webSocket) {
+                Log.e("socketCheck", "Ignoring onFailure from old socket")
+                return
+            }
+
+            if (shouldReconnect) {
+                waitAndReconnect()
+            }
         }
+    }
+
+    private fun waitAndReconnect() {
+        try {
+            Thread.sleep(3000)
+        } catch (e: InterruptedException) {
+            e.printStackTrace()
+        }
+        reconnect()
     }
 }

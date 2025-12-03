@@ -1,3 +1,4 @@
+/*
 package com.example.tutorial
 
 import android.content.Context
@@ -149,3 +150,4 @@ data class BoundingBox(
     var x1: Float, var y1: Float, var x2: Float, var y2: Float,
     val conf: Float, val cls: Int, val label: String
 )
+*/
