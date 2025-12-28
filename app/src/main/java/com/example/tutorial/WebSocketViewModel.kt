@@ -94,8 +94,10 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun connect() {
-        webSocketClient.setSocketUrl("ws://192.168.1.106:8080")
+        // webSocketClient.setSocketUrl("ws://192.168.1.106:8080") // casa To
         // webSocketClient.setSocketUrl("ws://172.20.10.3:8080")
+        // webSocketClient.setSocketUrl("ws://10.42.0.1:8080") // hotspot vado
+        webSocketClient.setSocketUrl("ws://192.168.1.3:8080") // casa vado modem
         webSocketClient.connect()
         webSocketClient.sendMessage("start")
 
