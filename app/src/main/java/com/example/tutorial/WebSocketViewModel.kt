@@ -19,7 +19,7 @@ import java.util.Locale
 import android.content.ContentValues
 import android.os.Build
 import android.provider.MediaStore
-
+import com.example.tutorial.YoloDetector
 
 class WebSocketViewModel(application: Application) : AndroidViewModel(application) {
     private val webSocketClient = WebSocketClient.getInstance()
@@ -31,6 +31,9 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     // message to show on screen
     private val _messages = MutableStateFlow("")
     val messages: StateFlow<String> = _messages
+    val yoloDetector : YoloDetector = YoloDetector(application)
+
+
 
     init {
         // Initialize the listener ONCE when ViewModel is created
@@ -75,6 +78,9 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                     val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                     if (bitmap != null) {
                         saveBitmapToFile(bitmap)
+
+                        // run YOLO inference
+                        yoloDetector.runObjectDetection(bitmap)
                     } else {
                         Log.e("socketCheck", "Failed to decode ByteArray into Bitmap")
                     }

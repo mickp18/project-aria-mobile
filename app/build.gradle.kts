@@ -47,16 +47,16 @@ dependencies {
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
 
-    // ViewMOdel
+    // ViewModel
     implementation(libs.androidx.lifecycle.viewmodel.ktx)
     implementation(libs.androidx.lifecycle.viewmodel.savedstate)
     implementation(libs.androidx.lifecycle.runtime.ktx)
 
     implementation(libs.okhttp)
-    // implementation ("com.google.ai.edge.litert:+")
-    //implementation(libs.litert.support)
-    //implementation(libs.tensorflow.lite)
-    //implementation(libs.tensorflow.lite.support)
-    //implementation(libs.tensorflow.lite.gpu)
+    implementation("org.tensorflow:tensorflow-lite-task-vision:0.4.4")
+
+    // Optional: Add GPU support if you want faster detection
+    implementation("org.tensorflow:tensorflow-lite-gpu-delegate-plugin:0.4.4")
+    implementation("org.tensorflow:tensorflow-lite-gpu:2.14.0")
 
 }
