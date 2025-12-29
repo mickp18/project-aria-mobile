@@ -34,6 +34,9 @@ android {
         jvmTarget = "17"
 
     }
+    aaptOptions {
+        noCompress("tflite")
+    }
 }
 
 dependencies {
@@ -55,8 +58,7 @@ dependencies {
     implementation(libs.okhttp)
     implementation("org.tensorflow:tensorflow-lite-task-vision:0.4.4")
 
-    // Optional: Add GPU support if you want faster detection
+    // GPU support for real-time performance
     implementation("org.tensorflow:tensorflow-lite-gpu-delegate-plugin:0.4.4")
     implementation("org.tensorflow:tensorflow-lite-gpu:2.14.0")
-
 }

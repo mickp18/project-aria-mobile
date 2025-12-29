@@ -6,20 +6,21 @@ import android.graphics.BitmapFactory
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.ViewModelProvider
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONObject
-import java.io.File
-import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import android.content.ContentValues
 import android.os.Build
 import android.provider.MediaStore
-import com.example.tutorial.YoloDetector
+import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.Dispatchers
 
 class WebSocketViewModel(application: Application) : AndroidViewModel(application) {
     private val webSocketClient = WebSocketClient.getInstance()
@@ -31,6 +32,9 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     // message to show on screen
     private val _messages = MutableStateFlow("")
     val messages: StateFlow<String> = _messages
+
+    private val isProcessing = AtomicBoolean(false)
+
     val yoloDetector : YoloDetector = YoloDetector(application)
 
 
@@ -74,20 +78,28 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             override fun onBinaryMessage(bytes: ByteArray) {
                 Log.i("socketCheck", "onBinaryMessage()")
                 // Handle binary messages if needed
-                try {
-                    val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                    if (bitmap != null) {
-                        saveBitmapToFile(bitmap)
-
-                        // run YOLO inference
-                        yoloDetector.runObjectDetection(bitmap)
-                    } else {
-                        Log.e("socketCheck", "Failed to decode ByteArray into Bitmap")
-                    }
-                } catch (e: Exception) {
-                    Log.e("socketCheck", "Error processing binary message", e)
+                if (isProcessing.get()) {
+                    Log.d("socketCheck", "Ignoring binary message while processing previous one")
+                    return
                 }
 
+                // Process the frame in a background thread
+                viewModelScope.launch(Dispatchers.Default) {
+                    // Try to set processing to true. If it fails, another thread won.
+                    if (isProcessing.compareAndSet(false, true)) {
+                        try {
+                            val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                            if (bitmap != null) {
+                                // Run YOLO inference
+                                yoloDetector.runObjectDetection(bitmap, 0)
+                            }
+                        } catch (e: Exception) {
+                            Log.e("WebSocketViewModel", "Inference error", e)
+                        } finally {
+                            isProcessing.set(false)
+                        }
+                    }
+                }
             }
 
             override fun onOpen() {
