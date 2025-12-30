@@ -15,6 +15,12 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        ndk {
+            abiFilters.add("armeabi-v7a")
+            abiFilters.add("arm64-v8a")
+            abiFilters.add("x86")
+            abiFilters.add("x86_64")
+        }
     }
 
     buildTypes {
@@ -26,6 +32,13 @@ android {
             )
         }
     }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -34,8 +47,8 @@ android {
         jvmTarget = "17"
 
     }
-    aaptOptions {
-        noCompress("tflite")
+    androidResources {
+        noCompress.add("tflite")
     }
 }
 
@@ -56,9 +69,16 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.ktx)
 
     implementation(libs.okhttp)
-    implementation("org.tensorflow:tensorflow-lite-task-vision:0.4.4")
 
-    // GPU support for real-time performance
-    implementation("org.tensorflow:tensorflow-lite-gpu-delegate-plugin:0.4.4")
-    implementation("org.tensorflow:tensorflow-lite-gpu:2.14.0")
+    // The new core runtime (replaces org.tensorflow:tensorflow-lite)
+    implementation("com.google.ai.edge.litert:litert:1.0.1")
+    // The new GPU delegate (replaces org.tensorflow:tensorflow-lite-gpu)
+    implementation("com.google.ai.edge.litert:litert-gpu:1.0.1")
+    // The new GPU API (contains the modern GpuDelegateFactory)
+    implementation("com.google.ai.edge.litert:litert-gpu-api:1.0.1")
+
+
+//    implementation("org.tensorflow:tensorflow-lite-support:0.4.4") // Useful for TensorImage
+
+    implementation("org.yaml:snakeyaml:2.0")
 }

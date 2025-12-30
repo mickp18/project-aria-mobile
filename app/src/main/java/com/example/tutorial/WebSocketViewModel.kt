@@ -91,7 +91,12 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                             val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                             if (bitmap != null) {
                                 // Run YOLO inference
-                                yoloDetector.runObjectDetection(bitmap, 0)
+                                val result = yoloDetector.detect(bitmap)
+
+                                for (det in result.detections) {
+                                    println("Found ${det.category.label} at ${det.boundingBox}")
+                                }
+
                             }
                         } catch (e: Exception) {
                             Log.e("WebSocketViewModel", "Inference error", e)
