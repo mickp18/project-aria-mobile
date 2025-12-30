@@ -53,10 +53,6 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.ktx)
 
     implementation(libs.okhttp)
-    // implementation ("com.google.ai.edge.litert:+")
-    //implementation(libs.litert.support)
-    //implementation(libs.tensorflow.lite)
-    //implementation(libs.tensorflow.lite.support)
-    //implementation(libs.tensorflow.lite.gpu)
+
 
 }
