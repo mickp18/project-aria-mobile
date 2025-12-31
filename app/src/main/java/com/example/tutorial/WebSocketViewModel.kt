@@ -85,22 +85,35 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
 
                 // Process the frame in a background thread
                 viewModelScope.launch(Dispatchers.Default) {
-                    // Try to set processing to true. If it fails, another thread won.
                     if (isProcessing.compareAndSet(false, true)) {
                         try {
+                            // Decode bitmap
                             val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+
                             if (bitmap != null) {
-                                // Run YOLO inference
-                                val result = yoloDetector.detect(bitmap)
+                                val results = yoloDetector.detect(bitmap)
 
-                                for (det in result.detections) {
-                                    Log.d("yolo", "Found ${det.category.label} at ${det.boundingBox}")
-                                    Log.d("yolo", "Inference time ${result.inferenceTime} ms")
+                                if (results.detections.isEmpty()) {
+                                    Log.i("YOLO", "No detections")
                                 }
+                                else {
+                                    for (det in results.detections) {
+                                        Log.i(
+                                            ",YOLO",
+                                            "Found ${det.category.label} at ${det.boundingBox}"
+                                        )
 
+                                    }
+                                }
+                                Log.i(",YOLO" , "Executed YOLO in ${results.inferenceTime} ms")
+
+
+                            } else {
+                                Log.e("socketCheck", "Failed to decode bitmap")
                             }
-                        } catch (e: Exception) {
-                            Log.e("WebSocketViewModel", "Inference error", e)
+                        } catch (e: Throwable) {
+                            // CRITICAL: Catch 'Throwable' to handle OutOfMemoryError
+                            Log.e("socketCheck", "Error processing frame: ${e.localizedMessage}", e)
                         } finally {
                             isProcessing.set(false)
                         }

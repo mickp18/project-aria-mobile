@@ -10,17 +10,13 @@ import okio.ByteString
 import java.util.concurrent.TimeUnit
 
 class WebSocketClient {
-    // @Volatile ensures checking 'webSocket' from a background thread
-    // always sees the latest assigned instance.
     @Volatile private var webSocket: WebSocket? = null
-
     private var socketListener: SocketListener? = null
     private var socketUrl = ""
-//    private var shouldReconnect = false
 
     private val client: OkHttpClient = OkHttpClient.Builder()
-        .readTimeout(5, TimeUnit.SECONDS) // Reduced from 60 to 10
-        .connectTimeout(10, TimeUnit.SECONDS) // Added connect timeout
+        .readTimeout(10, TimeUnit.SECONDS)   // Give it a bit more breathing room (10s)
+        .connectTimeout(10, TimeUnit.SECONDS)
         .build()
 
     companion object {
@@ -45,27 +41,15 @@ class WebSocketClient {
         this.socketUrl = socketUrl
     }
 
-    private fun initWebSocket() {
-        Log.e("socketCheck", "initWebSocket() socketurl = $socketUrl")
+    fun connect() {
+        Log.e("socketCheck", "connect()")
 
-        // IMPORTANT: Cancel any pending attempts before starting a new one
-        // this prevents the "Ignoring onFailure from old socket" clutter.
+        // Cancel OLD attempts only when starting a NEW one
         client.dispatcher.cancelAll()
 
         val request = Request.Builder().url(url = socketUrl).build()
         webSocket = client.newWebSocket(request, webSocketListener)
     }
-
-    fun connect() {
-        Log.e("socketCheck", "connect()")
-//        shouldReconnect = false
-        initWebSocket()
-    }
-
-//    fun reconnect() {
-//        Log.e("socketCheck", "reconnect()")
-//        initWebSocket()
-//    }
 
     fun sendMessage(message: String) {
         Log.e("socketCheck", "sendMessage($message)")
@@ -74,30 +58,31 @@ class WebSocketClient {
 
     fun disconnect() {
         Log.e("socketCheck", "disconnect()")
-//        shouldReconnect = false
 
+        // 1. Send the stop command
         webSocket?.send("stop")
 
-        webSocket?.close(1000, "User disconnected")
+        // 2. Close gracefully (Wait for server to acknowledge)
+        // This flushes the "stop" message before closing.
+        val closed = webSocket?.close(1000, "User disconnected")
 
-        webSocket?.cancel()
+        if (closed != true) {
+            // Only cancel if close() failed to initiate (e.g. already closed)
+            webSocket?.cancel()
+        }
+
         webSocket = null
-    }
-
-    fun isSocketConnected() : Boolean {
-        return webSocket != null
     }
 
     interface SocketListener {
         fun onMessage(message: String)
-        fun onBinaryMessage(bytes: ByteArray) // Added to handle bytes
+        fun onBinaryMessage(bytes: ByteArray)
         fun onOpen()
         fun onError(error: String)
     }
 
     private val webSocketListener = object : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
-            // Log.e("socketCheck", "onOpen()")
             socketListener?.onOpen()
         }
 
@@ -105,48 +90,24 @@ class WebSocketClient {
             socketListener?.onMessage(text)
         }
 
-        // Handle incoming binary messages
         override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
             socketListener?.onBinaryMessage(bytes.toByteArray())
         }
 
-        override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-            Log.e("socketCheck", "onClosing()")
-        }
-
-//        override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-//            Log.e("socketCheck", "onClosed()")
-//
-//            if (webSocket != this@WebSocketClient.webSocket) {
-//                Log.e("socketCheck", "Ignoring onClosed from old socket")
-//                return
-//            }
-//
-////            if (shouldReconnect) {
-////                waitAndReconnect()
-////            }
-//        }
-
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             Log.e("socketCheck", "onFailure() : ${t.localizedMessage}")
+            socketListener?.onError(t.localizedMessage ?: "Connection Error")
 
-            // Notify the UI that an error occurred
-            socketListener?.onError(t.localizedMessage ?: "Failed to connect")
-
-            // Clean up the failed socket immediately
+            // It's safe to cancel here because the connection is already broken
             webSocket.cancel()
             if (this@WebSocketClient.webSocket == webSocket) {
                 this@WebSocketClient.webSocket = null
             }
         }
+
+        override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+            Log.e("socketCheck", "onClosed() : $reason")
+            // Connection closed cleanly
+        }
     }
-//
-//    private fun waitAndReconnect() {
-//        try {
-//            Thread.sleep(3000)
-//        } catch (e: InterruptedException) {
-//            e.printStackTrace()
-//        }
-//        reconnect()
-//    }
 }

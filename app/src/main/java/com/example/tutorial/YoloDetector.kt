@@ -14,7 +14,7 @@ data class DetectionResult(val detections: List<ObjectDetection>, val inferenceT
 
 class YoloDetector(
     val context: Context,
-    val modelFilename: String = "best_int8.tflite",
+    val modelFilename: String = "yolo11n_float32.tflite",
     val metadataFilename: String = "metadata.yaml",
     val confidenceThreshold: Float = 0.5f,
     val iouThreshold: Float = 0.3f
