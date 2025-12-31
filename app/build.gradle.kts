@@ -78,7 +78,7 @@ dependencies {
     implementation("com.google.ai.edge.litert:litert-gpu-api:1.0.1")
 
 
-//    implementation("org.tensorflow:tensorflow-lite-support:0.4.4") // Useful for TensorImage
+    implementation("com.google.ai.edge.litert:litert-support-api:1.4.1")
 
     implementation("org.yaml:snakeyaml:2.0")
 }

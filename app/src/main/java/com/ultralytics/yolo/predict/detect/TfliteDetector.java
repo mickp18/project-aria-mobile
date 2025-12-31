@@ -4,15 +4,8 @@ import android.content.Context;
 import android.content.res.AssetFileDescriptor;
 import android.content.res.AssetManager;
 import android.graphics.Bitmap;
-import android.graphics.Canvas;
-import android.graphics.Matrix;
-import android.graphics.Paint;
 import android.os.Handler;
 import android.os.Looper;
-import android.os.SystemClock;
-
-
-//import androidx.camera.core.ImageProxy;
 
 import com.ultralytics.yolo.ImageProcessing;
 //import com.ultralytics.yolo.ImageUtils;
@@ -21,7 +14,6 @@ import com.ultralytics.yolo.models.YoloModel;
 import com.ultralytics.yolo.predict.PredictorException;
 
 
-import org.tensorflow.lite.DataType;
 import org.tensorflow.lite.Interpreter;
 import org.tensorflow.lite.gpu.CompatibilityList;
 import org.tensorflow.lite.gpu.GpuDelegate;
@@ -29,7 +21,7 @@ import org.tensorflow.lite.gpu.GpuDelegateFactory;
 //import org.tensorflow.lite.support.common.ops.NormalizeOp;
 //import org.tensorflow.lite.support.image.ImageProcessor;
 //import org.tensorflow.lite.support.image.TensorImage;
-//import org.tensorflow.lite.support.image.ops.ResizeOp;
+import org.tensorflow.lite.support.image.ops.ResizeOp;
 
 import java.io.FileInputStream;
 import java.io.IOException;

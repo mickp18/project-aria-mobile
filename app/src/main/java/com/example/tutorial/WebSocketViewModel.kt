@@ -34,8 +34,18 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     val messages: StateFlow<String> = _messages
 
     private val isProcessing = AtomicBoolean(false)
-
-    val yoloDetector : YoloDetector = YoloDetector(application)
+    val threshold = 0.5f
+    val numThreads=2
+    val currentDelegate = 0
+    val maxResults = 3
+    val yoloDetector : YoloDetector = YoloDetector(
+                    threshold,
+                    0.3f,
+                    numThreads,
+                    maxResults,
+                    currentDelegate,
+                    application,
+                )
 
 
 
@@ -91,7 +101,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                             val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
 
                             if (bitmap != null) {
-                                val results = yoloDetector.detect(bitmap)
+                                val results = yoloDetector.detect(bitmap,0)
 
                                 if (results.detections.isEmpty()) {
                                     Log.i("YOLO", "No detections")
@@ -105,7 +115,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
 
                                     }
                                 }
-                                Log.i(",YOLO" , "Executed YOLO in ${results.inferenceTime} ms")
+//                                Log.i(",YOLO" , "Executed YOLO in ${results.info.i} ms")
 
 
                             } else {
