@@ -94,7 +94,8 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                                 val result = yoloDetector.detect(bitmap)
 
                                 for (det in result.detections) {
-                                    println("Found ${det.category.label} at ${det.boundingBox}")
+                                    Log.d("yolo", "Found ${det.category.label} at ${det.boundingBox}")
+                                    Log.d("yolo", "Inference time ${result.inferenceTime} ms")
                                 }
 
                             }
@@ -111,7 +112,14 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                 Log.i("socketCheck", "onOpen()")
                 // Update the flow so the Activity sees it
                 _messages.value = "Socket Opened"
+                _isSocketConnected.value = true
 
+            }
+            override fun onError(error: String) {
+                // Reset UI state so Start button becomes enabled again
+                _isSocketConnected.value = false
+                _messages.value = "Connection Failed: $error"
+                Log.e("socketCheck", "UI notified of error: $error")
             }
         })
     }
@@ -124,7 +132,6 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         webSocketClient.connect()
         webSocketClient.sendMessage("start")
 
-        // Update state
         _isSocketConnected.value = true
     }
 
@@ -133,6 +140,8 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         webSocketClient.disconnect()
         _isSocketConnected.value = false
     }
+
+
 
     private fun saveBitmapToFile(bitmap: Bitmap) {
         val context = getApplication<Application>().applicationContext
@@ -172,6 +181,11 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         } catch (e: Exception) {
             Log.e("socketCheck", "Error saving image to MediaStore", e)
         }
+    }
+    override fun onCleared() {
+        super.onCleared()
+        disconnect()
+        _isSocketConnected.value = false
     }
 }
 class WebSocketViewModelFactory(private val application: Application) : ViewModelProvider.Factory {

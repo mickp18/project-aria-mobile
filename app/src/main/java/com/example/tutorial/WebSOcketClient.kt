@@ -16,10 +16,11 @@ class WebSocketClient {
 
     private var socketListener: SocketListener? = null
     private var socketUrl = ""
-    private var shouldReconnect = false
+//    private var shouldReconnect = false
 
     private val client: OkHttpClient = OkHttpClient.Builder()
-        .readTimeout(60, TimeUnit.SECONDS) // if timeout reached without any data received, disconnect
+        .readTimeout(5, TimeUnit.SECONDS) // Reduced from 60 to 10
+        .connectTimeout(10, TimeUnit.SECONDS) // Added connect timeout
         .build()
 
     companion object {
@@ -46,20 +47,25 @@ class WebSocketClient {
 
     private fun initWebSocket() {
         Log.e("socketCheck", "initWebSocket() socketurl = $socketUrl")
+
+        // IMPORTANT: Cancel any pending attempts before starting a new one
+        // this prevents the "Ignoring onFailure from old socket" clutter.
+        client.dispatcher.cancelAll()
+
         val request = Request.Builder().url(url = socketUrl).build()
         webSocket = client.newWebSocket(request, webSocketListener)
     }
 
     fun connect() {
         Log.e("socketCheck", "connect()")
-        shouldReconnect = true
+//        shouldReconnect = false
         initWebSocket()
     }
 
-    fun reconnect() {
-        Log.e("socketCheck", "reconnect()")
-        initWebSocket()
-    }
+//    fun reconnect() {
+//        Log.e("socketCheck", "reconnect()")
+//        initWebSocket()
+//    }
 
     fun sendMessage(message: String) {
         Log.e("socketCheck", "sendMessage($message)")
@@ -68,15 +74,25 @@ class WebSocketClient {
 
     fun disconnect() {
         Log.e("socketCheck", "disconnect()")
-        shouldReconnect = false
+//        shouldReconnect = false
+
+        webSocket?.send("stop")
+
         webSocket?.close(1000, "User disconnected")
+
+        webSocket?.cancel()
         webSocket = null
+    }
+
+    fun isSocketConnected() : Boolean {
+        return webSocket != null
     }
 
     interface SocketListener {
         fun onMessage(message: String)
         fun onBinaryMessage(bytes: ByteArray) // Added to handle bytes
         fun onOpen()
+        fun onError(error: String)
     }
 
     private val webSocketListener = object : WebSocketListener() {
@@ -98,39 +114,39 @@ class WebSocketClient {
             Log.e("socketCheck", "onClosing()")
         }
 
-        override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-            Log.e("socketCheck", "onClosed()")
-
-            if (webSocket != this@WebSocketClient.webSocket) {
-                Log.e("socketCheck", "Ignoring onClosed from old socket")
-                return
-            }
-
-            if (shouldReconnect) {
-                waitAndReconnect()
-            }
-        }
+//        override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+//            Log.e("socketCheck", "onClosed()")
+//
+//            if (webSocket != this@WebSocketClient.webSocket) {
+//                Log.e("socketCheck", "Ignoring onClosed from old socket")
+//                return
+//            }
+//
+////            if (shouldReconnect) {
+////                waitAndReconnect()
+////            }
+//        }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             Log.e("socketCheck", "onFailure() : ${t.localizedMessage}")
 
-            if (webSocket != this@WebSocketClient.webSocket) {
-                Log.e("socketCheck", "Ignoring onFailure from old socket")
-                return
-            }
+            // Notify the UI that an error occurred
+            socketListener?.onError(t.localizedMessage ?: "Failed to connect")
 
-            if (shouldReconnect) {
-                waitAndReconnect()
+            // Clean up the failed socket immediately
+            webSocket.cancel()
+            if (this@WebSocketClient.webSocket == webSocket) {
+                this@WebSocketClient.webSocket = null
             }
         }
     }
-
-    private fun waitAndReconnect() {
-        try {
-            Thread.sleep(3000)
-        } catch (e: InterruptedException) {
-            e.printStackTrace()
-        }
-        reconnect()
-    }
+//
+//    private fun waitAndReconnect() {
+//        try {
+//            Thread.sleep(3000)
+//        } catch (e: InterruptedException) {
+//            e.printStackTrace()
+//        }
+//        reconnect()
+//    }
 }
