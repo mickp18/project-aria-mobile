@@ -6,20 +6,21 @@ import android.graphics.BitmapFactory
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.ViewModelProvider
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONObject
-import java.io.File
-import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import android.content.ContentValues
 import android.os.Build
 import android.provider.MediaStore
-
+import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.Dispatchers
 
 class WebSocketViewModel(application: Application) : AndroidViewModel(application) {
     private val webSocketClient = WebSocketClient.getInstance()
@@ -31,6 +32,22 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     // message to show on screen
     private val _messages = MutableStateFlow("")
     val messages: StateFlow<String> = _messages
+
+    private val isProcessing = AtomicBoolean(false)
+    val threshold = 0.5f
+    val numThreads=2
+    val currentDelegate = 0
+    val maxResults = 3
+    val yoloDetector : YoloDetector = YoloDetector(
+                    threshold,
+                    0.3f,
+                    numThreads,
+                    maxResults,
+                    currentDelegate,
+                    application,
+                )
+
+
 
     init {
         // Initialize the listener ONCE when ViewModel is created
@@ -71,35 +88,73 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             override fun onBinaryMessage(bytes: ByteArray) {
                 Log.i("socketCheck", "onBinaryMessage()")
                 // Handle binary messages if needed
-                try {
-                    val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                    if (bitmap != null) {
-                        saveBitmapToFile(bitmap)
-                    } else {
-                        Log.e("socketCheck", "Failed to decode ByteArray into Bitmap")
-                    }
-                } catch (e: Exception) {
-                    Log.e("socketCheck", "Error processing binary message", e)
+                if (isProcessing.get()) {
+                    Log.d("socketCheck", "Ignoring binary message while processing previous one")
+                    return
                 }
 
+                // Process the frame in a background thread
+                viewModelScope.launch(Dispatchers.Default) {
+                    if (isProcessing.compareAndSet(false, true)) {
+                        try {
+                            // Decode bitmap
+                            val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+
+                            if (bitmap != null) {
+                                val results = yoloDetector.detect(bitmap,0)
+
+                                if (results.detections.isEmpty()) {
+                                    Log.i("YOLO", "No detections")
+                                }
+                                else {
+                                    for (det in results.detections) {
+                                        Log.i(
+                                            ",YOLO",
+                                            "Found ${det.category.label} at ${det.boundingBox}"
+                                        )
+
+                                    }
+                                }
+//                                Log.i(",YOLO" , "Executed YOLO in ${results.info.i} ms")
+
+
+                            } else {
+                                Log.e("socketCheck", "Failed to decode bitmap")
+                            }
+                        } catch (e: Throwable) {
+                            // CRITICAL: Catch 'Throwable' to handle OutOfMemoryError
+                            Log.e("socketCheck", "Error processing frame: ${e.localizedMessage}", e)
+                        } finally {
+                            isProcessing.set(false)
+                        }
+                    }
+                }
             }
 
             override fun onOpen() {
                 Log.i("socketCheck", "onOpen()")
                 // Update the flow so the Activity sees it
                 _messages.value = "Socket Opened"
+                _isSocketConnected.value = true
 
+            }
+            override fun onError(error: String) {
+                // Reset UI state so Start button becomes enabled again
+                _isSocketConnected.value = false
+                _messages.value = "Connection Failed: $error"
+                Log.e("socketCheck", "UI notified of error: $error")
             }
         })
     }
 
     fun connect() {
-        webSocketClient.setSocketUrl("ws://192.168.1.106:8080")
+        // webSocketClient.setSocketUrl("ws://192.168.1.106:8080") // casa To
         // webSocketClient.setSocketUrl("ws://172.20.10.3:8080")
+        // webSocketClient.setSocketUrl("ws://10.42.0.1:8080") // hotspot vado
+        webSocketClient.setSocketUrl("ws://192.168.1.3:8080") // casa vado modem
         webSocketClient.connect()
         webSocketClient.sendMessage("start")
 
-        // Update state
         _isSocketConnected.value = true
     }
 
@@ -108,6 +163,8 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         webSocketClient.disconnect()
         _isSocketConnected.value = false
     }
+
+
 
     private fun saveBitmapToFile(bitmap: Bitmap) {
         val context = getApplication<Application>().applicationContext
@@ -147,6 +204,11 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         } catch (e: Exception) {
             Log.e("socketCheck", "Error saving image to MediaStore", e)
         }
+    }
+    override fun onCleared() {
+        super.onCleared()
+        disconnect()
+        _isSocketConnected.value = false
     }
 }
 class WebSocketViewModelFactory(private val application: Application) : ViewModelProvider.Factory {
