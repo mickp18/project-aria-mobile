@@ -70,15 +70,13 @@ dependencies {
 
     implementation(libs.okhttp)
 
-    // The new core runtime (replaces org.tensorflow:tensorflow-lite)
+    // TensorFlow Lite for YOLO
     implementation("com.google.ai.edge.litert:litert:1.0.1")
-    // The new GPU delegate (replaces org.tensorflow:tensorflow-lite-gpu)
     implementation("com.google.ai.edge.litert:litert-gpu:1.0.1")
-    // The new GPU API (contains the modern GpuDelegateFactory)
     implementation("com.google.ai.edge.litert:litert-gpu-api:1.0.1")
-
-
     implementation("com.google.ai.edge.litert:litert-support-api:1.4.1")
 
+    // Google MLKit
+    implementation("com.google.mlkit:text-recognition:16.0.1")
     implementation("org.yaml:snakeyaml:2.0")
 }
