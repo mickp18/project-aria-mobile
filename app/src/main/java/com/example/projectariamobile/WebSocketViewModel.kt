@@ -1,4 +1,4 @@
-package com.example.tutorial
+package com.example.projectariamobile
 
 import android.app.Application
 import android.graphics.Bitmap
@@ -61,9 +61,9 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     // Classes that should trigger OCR (configure as needed)
     private val ocrTargetClasses = setOf(
         "person",      // Example: run OCR on person detections
-        "license plate", // If you have a license plate class
-        "sign",        // Traffic signs
-        "card",        // ID cards, credit cards, etc.
+        "tv", // If you have a license plate class
+        "laptop",        // Traffic signs
+        "cell phone",        // ID cards, credit cards, etc.
         "document",    // Documents
         // Add your target classes here
     )
@@ -225,44 +225,35 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     /**
      * Handle OCR results - customize based on your needs
      */
-    private fun handleOCRResult(
-        objectClass: String,
-        text: String,
-        boundingBox: android.graphics.RectF
-    ) {
-        // Example: Log to analytics
-        Log.i("OCR_RESULT", "Class: $objectClass, Text: $text, BBox: $boundingBox")
+//    private fun handleOCRResult(
+//        objectClass: String,
+//        text: String,
+//        boundingBox: android.graphics.RectF
+//    ) {
+//        // Example: Log to analytics
+//        Log.i("OCR_RESULT", "Class: $objectClass, Text: $text, BBox: $boundingBox")
+//
+//        // Example: Send to server
+//        // webSocketClient.sendMessage(createOCRResultMessage(objectClass, text))
+//
+//        // Example: Save to database
+//        // saveOCRResultToDatabase(objectClass, text, System.currentTimeMillis())
+//
+//        // Example: Trigger specific actions based on text content
+//        when (objectClass) {
+//            "license plate" -> handleLicensePlate(text)
+//            "sign" -> handleTrafficSign(text)
+//            "card" -> handleCard(text)
+//            else -> Log.d("OCR", "No specific handler for $objectClass")
+//        }
+//    }
 
-        // Example: Send to server
-        // webSocketClient.sendMessage(createOCRResultMessage(objectClass, text))
-
-        // Example: Save to database
-        // saveOCRResultToDatabase(objectClass, text, System.currentTimeMillis())
-
-        // Example: Trigger specific actions based on text content
-        when (objectClass) {
-            "license plate" -> handleLicensePlate(text)
-            "sign" -> handleTrafficSign(text)
-            "card" -> handleCard(text)
-            else -> Log.d("OCR", "No specific handler for $objectClass")
-        }
-    }
-
-    private fun handleLicensePlate(plateText: String) {
-        // Custom logic for license plates
-        Log.i("LICENSE_PLATE", "Detected plate: $plateText")
-        // Send alert, check database, etc.
-    }
 
     private fun handleTrafficSign(signText: String) {
         // Custom logic for traffic signs
         Log.i("TRAFFIC_SIGN", "Detected sign: $signText")
     }
 
-    private fun handleCard(cardText: String) {
-        // Custom logic for cards
-        Log.i("CARD", "Detected card text: $cardText")
-    }
 
     /**
      * Add or remove OCR target classes dynamically

@@ -1,4 +1,4 @@
-package com.example.tutorial
+package com.example.projectariamobile
 
 import android.util.Log
 import okhttp3.OkHttpClient
@@ -97,6 +97,13 @@ class WebSocketClient {
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             Log.e("socketCheck", "onFailure() : ${t.localizedMessage}")
             socketListener?.onError(t.localizedMessage ?: "Connection Error")
+
+            // IF TIME OUT notify server and stop streaming
+            if (this@WebSocketClient.webSocket != null){
+                // manage case where after streaming started, server stops sending for more than 10 seconds
+                this@WebSocketClient.webSocket?.send("stop")
+            }
+
 
             // It's safe to cancel here because the connection is already broken
             webSocket.cancel()

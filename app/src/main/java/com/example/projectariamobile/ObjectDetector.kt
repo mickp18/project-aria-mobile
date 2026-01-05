@@ -1,8 +1,7 @@
-package com.example.tutorial
+package com.example.projectariamobile
 
 import android.graphics.Bitmap
 import android.graphics.RectF
-import org.tensorflow.lite.support.image.TensorImage
 
 class Category (
     val label: String,

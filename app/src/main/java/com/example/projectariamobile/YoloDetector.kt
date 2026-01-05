@@ -1,4 +1,4 @@
-package com.example.tutorial
+package com.example.projectariamobile
 
 import android.content.Context
 import android.graphics.Bitmap
@@ -7,7 +7,6 @@ import com.ultralytics.yolo.ImageProcessing
 import com.ultralytics.yolo.models.LocalYoloModel
 import com.ultralytics.yolo.predict.detect.DetectedObject
 import com.ultralytics.yolo.predict.detect.TfliteDetector
-import org.tensorflow.lite.support.image.TensorImage
 
 
 class YoloDetector(
@@ -62,17 +61,19 @@ class YoloDetector(
 
         // ASPECT_RATIO = 4:3
         // => imgW = imgH * 3/4
-        var imgH: Int
-        var imgW: Int
-        if (imageRotation == 90 || imageRotation == 270) {
-            imgH = ppImage.height
-            imgW = imgH * 3 / 4
-        }
-        else {
-            imgW = ppImage.width
-            imgH = imgW * 3 / 4
-
-        }
+//        var imgH: Int
+//        var imgW: Int
+//        if (imageRotation == 90 || imageRotation == 270) {
+//            imgH = ppImage.height
+//            imgW = imgH * 3 / 4
+//        }
+//        else {
+//            imgW = ppImage.width
+//            imgH = imgW * 3 / 4
+//
+//        }
+        val originalWidth = image.width.toFloat()
+        val originalHeight = image.height.toFloat()
 
 
         for (result: DetectedObject in results) {
@@ -82,10 +83,14 @@ class YoloDetector(
             )
             val yoloBox = result.boundingBox
 
-            val left = yoloBox.left * imgW
-            val top = yoloBox.top * imgH
-            val right = yoloBox.right * imgW
-            val bottom = yoloBox.bottom * imgH
+//            val left = yoloBox.left * imgW
+//            val top = yoloBox.top * imgH
+//            val right = yoloBox.right * imgW
+//            val bottom = yoloBox.bottom * imgH
+            val left = yoloBox.left * originalWidth
+            val top = yoloBox.top * originalHeight
+            val right = yoloBox.right * originalWidth
+            val bottom = yoloBox.bottom * originalHeight
 
             val bbox = RectF(
                 left,

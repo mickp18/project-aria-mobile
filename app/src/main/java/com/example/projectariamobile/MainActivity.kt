@@ -1,4 +1,4 @@
-package com.example.tutorial
+package com.example.projectariamobile
 
 import android.os.Bundle
 import android.widget.Button
@@ -6,10 +6,6 @@ import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
-import android.util.Log
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.view.WindowManager
 import androidx.activity.viewModels
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch

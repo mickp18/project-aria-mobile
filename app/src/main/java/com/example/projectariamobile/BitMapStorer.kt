@@ -1,4 +1,4 @@
-package com.example.tutorial
+package com.example.projectariamobile
 
 import android.content.ContentValues
 import android.content.Context

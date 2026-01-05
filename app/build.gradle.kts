@@ -4,7 +4,7 @@ plugins {
 }
 
 android {
-    namespace = "com.example.tutorial"
+    namespace = "com.example.projectariamobile"
     compileSdk = 36
 
     defaultConfig {

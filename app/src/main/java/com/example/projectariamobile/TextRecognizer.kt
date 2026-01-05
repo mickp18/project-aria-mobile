@@ -1,18 +1,15 @@
-package com.example.tutorial
+package com.example.projectariamobile
 
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Rect
 
 import android.util.Log
-import com.google.android.gms.tasks.Task
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.Text
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.TextRecognizer
-import com.google.mlkit.vision.text.TextRecognizerOptionsInterface
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
-import kotlinx.coroutines.tasks.await
 
 
 /** Processor for the text detector. */
