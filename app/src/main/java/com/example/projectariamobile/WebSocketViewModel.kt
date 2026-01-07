@@ -60,12 +60,10 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
 
     // Classes that should trigger OCR (configure as needed)
     private val ocrTargetClasses = setOf(
-        "person",      // Example: run OCR on person detections
-        "tv", // If you have a license plate class
-        "laptop",        // Traffic signs
-        "cell phone",        // ID cards, credit cards, etc.
-        "document",    // Documents
-        // Add your target classes here
+        "room",
+        "direction_left",
+        "direction_right",
+        "stairs",
     )
 
     init {

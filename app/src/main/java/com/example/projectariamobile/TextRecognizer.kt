@@ -10,6 +10,7 @@ import com.google.mlkit.vision.text.Text
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.TextRecognizer
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import kotlinx.coroutines.tasks.await
 
 
 /** Processor for the text detector. */
@@ -48,8 +49,8 @@ class TextRecognitionProcessor(private val context: Context){
             }
 
             // Run OCR on cropped region
-            val text = null
-            // val text = recognizeText(croppedBitmap)
+//            val text = null
+            val text = recognizeText(croppedBitmap)
 
             // Clean up
             if (croppedBitmap != bitmap) {
@@ -61,31 +62,73 @@ class TextRecognitionProcessor(private val context: Context){
             null
         }
     }
-    fun getImagefromBitmap(bitmap : Bitmap) : InputImage{
-        return InputImage.fromBitmap(bitmap, 0)
+    /**
+     * Run OCR on full bitmap
+     */
+    suspend fun recognizeText(bitmap: Bitmap): String? {
+        return try {
+            val image = InputImage.fromBitmap(bitmap, 0)
+            val result = textRecognizer.process(image)
+                .addOnSuccessListener { visionText ->
+                    val resultText = visionText.text
+                    if (resultText.isNotBlank()) {
+                        Log.d("TextRecognizer", "Recognized text: $resultText")
+                    } else {
+                        Log.d("TextRecognizer", "No text found")
+                    }
+                }
+                .addOnFailureListener { e ->
+                    Log.e("textrecognizer", e.message.toString())
+                }
+                .await()
+
+            for ( block in  result.textBlocks){
+                Log.i("textrecognizer", "${block.text}")
+            }
+            // Extract all text blocks
+            val extractedText = result.textBlocks.joinToString("\n") { block ->
+                block.text
+            }
+
+            if (extractedText.isNotBlank()) {
+                //Log.d("TextRecognizer", "Recognized text: $extractedText")
+                extractedText
+            } else {
+                //Log.d("TextRecognizer", "No text found")
+                null
+            }
+        } catch (e: Exception) {
+            Log.e("TextRecognizer", "OCR failed: ${e.message}", e)
+            null
+        }
     }
 
-    suspend fun getTextfromImage(image : InputImage) : Text  {
-        val result = textRecognizer.process(image)
-            .addOnSuccessListener { visionText ->
-                // Task completed successfully
-                // ...
-
-            }
-            .addOnFailureListener { e ->
-                // Task failed with an exception
-                // ...
-            }
-        return result.result
-    }
-
-//    fun getText(bitmap : Bitmap){
-//        val image = getImagefromBitmap(bitmap)
-//        val result = getTextfromImage(image)
-//        val resultText = result.text
+    /**
+     * Get detailed OCR results with confidence and position
+     */
+//    suspend fun recognizeTextDetailed(bitmap: Bitmap): List<TextBlock>? {
+//        return try {
+//            val image = InputImage.fromBitmap(bitmap, 0)
+//            val result = textRecognizer.process(image).await()
 //
-//
-//
+//            result.textBlocks.map { block ->
+//                TextBlock(
+//                    text = block.text,
+//                    confidence = block. ?: 0f,
+//                    boundingBox = block.boundingBox,
+//                    lines = block.lines.map { line ->
+//                        TextLine(
+//                            text = line.text,
+//                            confidence = line.confidence ?: 0f,
+//                            boundingBox = line.boundingBox
+//                        )
+//                    }
+//                )
+//            }
+//        } catch (e: Exception) {
+//            Log.e("TextRecognizer", "Detailed OCR failed: ${e.message}", e)
+//            null
+//        }
 //    }
 
     /**
@@ -129,5 +172,18 @@ class TextRecognitionProcessor(private val context: Context){
         }
     }
 
+    // Data classes for structured results
+    data class TextBlock(
+        val text: String,
+        val confidence: Float,
+        val boundingBox: Rect?,
+        val lines: List<TextLine>
+    )
+
+    data class TextLine(
+        val text: String,
+        val confidence: Float,
+        val boundingBox: Rect?
+    )
 
 }
