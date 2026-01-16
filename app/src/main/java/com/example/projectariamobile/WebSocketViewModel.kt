@@ -18,11 +18,13 @@ import java.util.Date
 import java.util.Locale
 import android.content.ContentValues
 import android.os.Build
+import android.os.SystemClock
 import android.provider.MediaStore
 import androidx.lifecycle.application
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.Dispatchers
+import kotlin.text.category
 
 class WebSocketViewModel(application: Application) : AndroidViewModel(application) {
     private val webSocketClient = WebSocketClient.getInstance()
@@ -38,6 +40,14 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     // OCR results flow
     private val _ocrResults = MutableStateFlow<String?>(null)
     val ocrResults: StateFlow<String?> = _ocrResults.asStateFlow()
+
+    // Frame statistics
+    private val _frameStats = MutableStateFlow("")
+    val frameStats: StateFlow<String> = _frameStats.asStateFlow()
+
+    private var frameCount = 0
+    private var droppedFrames = 0
+    private var lastStatsTime = SystemClock.uptimeMillis()
 
     private val isProcessing = AtomicBoolean(false)
     val threshold = 0.5f
@@ -87,6 +97,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                                 _isSocketConnected.value = false
                                 _messages.value = "Server stopped: ${payload.optString("reason")}"
                                 webSocketClient.disconnect()
+                                Log.i("onMessage()", "received stopped")
                             }
                         }
                     }
@@ -97,9 +108,13 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
 
             override fun onBinaryMessage(bytes: ByteArray) {
                 Log.i("socketCheck", "onBinaryMessage()")
+                val receiveTime = SystemClock.uptimeMillis()
+                frameCount++
 
                 if (isProcessing.get()) {
-                    Log.d("socketCheck", "Ignoring binary message while processing previous one")
+                    droppedFrames++
+                    Log.d("socketCheck", "Dropped frame (still processing previous)")
+                    updateStats()
                     return
                 }
 
@@ -107,13 +122,21 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                 viewModelScope.launch(Dispatchers.Default) {
                     if (isProcessing.compareAndSet(false, true)) {
                         try {
+                            val frameSize = bytes.size / 1024.0
+                            Log.i("socketCheck", "Processing frame ${frameCount}: ${String.format("%.1f", frameSize)}KB")
+
+                            var start = SystemClock.uptimeMillis()
                             processFrame(bytes)
+                            var end = SystemClock.uptimeMillis()
+                            Log.i("socketCheck", "Frame processed in ${end - start} ms")
+                            updateStats()
                         } catch (e: Throwable) {
                             Log.e("socketCheck", "Error processing frame: ${e.localizedMessage}", e)
                         } finally {
                             isProcessing.set(false)
                         }
                     }
+
                 }
             }
 
@@ -121,6 +144,9 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                 Log.i("socketCheck", "onOpen()")
                 _messages.value = "Socket Opened"
                 _isSocketConnected.value = true
+                frameCount = 0
+                droppedFrames = 0
+                lastStatsTime = SystemClock.uptimeMillis()
             }
 
             override fun onError(error: String) {
@@ -130,87 +156,194 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             }
         })
     }
+    private fun updateStats() {
+        val currentTime = SystemClock.uptimeMillis()
+        val elapsedSeconds = (currentTime - lastStatsTime) / 1000.0
+
+        if (elapsedSeconds >= 5.0) {
+            val fps = frameCount / elapsedSeconds
+            val dropRate = (droppedFrames.toFloat() / frameCount) * 100
+
+            _frameStats.value = String.format(
+                "FPS: %.1f | Received: %d | Dropped: %d (%.1f%%)",
+                fps, frameCount, droppedFrames, dropRate
+            )
+
+            Log.i("STATS", _frameStats.value)
+
+            // Reset counters
+            frameCount = 0
+            droppedFrames = 0
+            lastStatsTime = currentTime
+        }
+    }
 
     /**
      * Process incoming video frame: run YOLO detection and OCR if needed
      */
+//    private suspend fun processFrame(bytes: ByteArray) {
+//        // Decode bitmap
+//        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+//
+//        if (bitmap == null) {
+//            Log.e("socketCheck", "Failed to decode bitmap")
+//            return
+//        }
+//        var count = 0
+//        try {
+////            val save_orig = saveBitmapToGallery(
+////                application,
+////                bitmap,
+////                fileName = "ORIGINAL_${count}_${System.currentTimeMillis()}.jpg",
+////                folderName = "YOLO_DETECTIONS"
+////            )
+////            if (save_orig) {
+////                Log.i("TextRecognizer", "saved frame number: $count ")
+////            } else {
+////                Log.e("TextRecognizer", "Failed to save cropped image")
+////            }
+////            count = count +1
+//            // Run YOLO detection
+//            var startTime = SystemClock.uptimeMillis()
+//            val results = yoloDetector.detect(bitmap, 0)
+//            val endTime = SystemClock.uptimeMillis()
+//
+//            val inferanceTime = endTime - startTime
+//            Log.i(
+//                "YOLO",
+//                "Found in $inferanceTime ms"
+//            )
+//
+//            if (results.detections.isEmpty()) {
+//                Log.i("YOLO", "No detections on frame; $count")
+//                return
+//            }
+//            count = count + 1
+//
+//            // Process each detection
+//            for (detection in results.detections) {
+//                val label = detection.category.label.lowercase()
+//                val bbox = detection.boundingBox
+//
+//
+//                Log.i(
+//                    "YOLO",
+//                    "Found $label at ${bbox} (confidence: ${detection.category.confidence})"
+//                )
+//
+//                val saved = saveBitmapToGallery(
+//                    application,
+//                    bitmap,
+//                    fileName = "ORIGINAL_${label}_${System.currentTimeMillis()}.jpg",
+//                    folderName = "YOLO_DETECTIONS"
+//                )
+////                if (saved) {
+////                    Log.i("TextRecognizer", "Cropped image saved for class: $label")
+////                } else {
+////                    Log.e("TextRecognizer", "Failed to save cropped image")
+////                }
+//
+//                // Check if this detection should trigger OCR
+//                if (shouldRunOCR(label)) {
+//                    Log.i("OCR", "Running OCR on detected $label")
+//
+//                    // Convert RectF to Rect for cropping
+//                    val cropRect = Rect(
+//                        bbox.left.toInt(),
+//                        bbox.top.toInt(),
+//                        bbox.right.toInt(),
+//                        bbox.bottom.toInt()
+//                    )
+//                    startTime = SystemClock.uptimeMillis()
+//                    // Run OCR on the bounding box
+//                    val recognizedText = textRecognizer.recognizeTextInBoundingBox(
+//                        bitmap,
+//                        cropRect,
+//                        label
+//                    )
+//                    val ocrTime = SystemClock.uptimeMillis() - startTime
+//                    Log.i("tOCR", "OCR executed in $ocrTime")
+//                    if (recognizedText != null) {
+//                        Log.i("OCR", "Recognized text in $label: $recognizedText")
+//
+//                        // Update UI with OCR result
+//                        _ocrResults.value = "[$label]: $recognizedText"
+//
+//                        // Optional: Save results or trigger other actions
+////                        handleOCRResult(label, recognizedText, bbox)
+//                    } else {
+//                        Log.i("OCR", "No text found in $label bounding box")
+//                    }
+//                }
+//            }
+//        } finally {
+//            // Clean up bitmap to prevent memory leaks
+//            bitmap.recycle()
+//        }
+//    }
     private suspend fun processFrame(bytes: ByteArray) {
-        // Decode bitmap
-        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-
-        if (bitmap == null) {
-            Log.e("socketCheck", "Failed to decode bitmap")
-            return
-        }
+        val decodeStart = SystemClock.uptimeMillis()
+        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return
+        val decodeTime = SystemClock.uptimeMillis() - decodeStart
 
         try {
-            // Run YOLO detection
+            Log.d("TIMING", "Decode: ${decodeTime}ms")
+
+            val yoloStart = SystemClock.uptimeMillis()
             val results = yoloDetector.detect(bitmap, 0)
+            val yoloTime = SystemClock.uptimeMillis() - yoloStart
+            Log.i("YOLO", "Detection completed in ${yoloTime}ms, found ${results.detections.size} objects")
 
-            if (results.detections.isEmpty()) {
-                Log.i("YOLO", "No detections")
-                return
-            }
+            var totalOcrTime = 0L
+            var ocrCount = 0
 
-            // Process each detection
             for (detection in results.detections) {
                 val label = detection.category.label.lowercase()
-                val bbox = detection.boundingBox
+                val confidence = detection.category.confidence
+                var bbox= detection.boundingBox
 
                 Log.i(
                     "YOLO",
-                    "Found $label at ${bbox} (confidence: ${detection.category.confidence})"
+                    "Detected: $label (${String.format("%.2f", confidence)}) at [${bbox.left.toInt()},${bbox.top.toInt()},${bbox.right.toInt()},${bbox.bottom.toInt()}]"
                 )
-                val saved = saveBitmapToGallery(
-                    application,
-                    bitmap,
-                    fileName = "ORIGINAL_${label}_${System.currentTimeMillis()}.jpg",
-                    folderName = "YOLO_DETECTIONS"
-                )
-                if (saved) {
-                    Log.i("TextRecognizer", "Cropped image saved for class: $label")
-                } else {
-                    Log.e("TextRecognizer", "Failed to save cropped image")
-                }
 
-                // Check if this detection should trigger OCR
                 if (shouldRunOCR(label)) {
-                    Log.i("OCR", "Running OCR on detected $label")
-
-                    // Convert RectF to Rect for cropping
+                    ocrCount++
                     val cropRect = Rect(
                         bbox.left.toInt(),
                         bbox.top.toInt(),
                         bbox.right.toInt(),
                         bbox.bottom.toInt()
                     )
-
-                    // Run OCR on the bounding box
-                    val recognizedText = textRecognizer.recognizeTextInBoundingBox(
-                        bitmap,
-                        cropRect,
-                        label
-                    )
+                    val ocrStart = SystemClock.uptimeMillis()
+                    val recognizedText = textRecognizer.recognizeTextInBoundingBox(bitmap, cropRect, label)
+                    val ocrTime = SystemClock.uptimeMillis() - ocrStart
+                    totalOcrTime += ocrTime
 
                     if (recognizedText != null) {
-                        Log.i("OCR", "Recognized text in $label: $recognizedText")
-
-                        // Update UI with OCR result
+                        Log.i("OCR", "Recognized in ${ocrTime}ms: [$label] = $recognizedText")
                         _ocrResults.value = "[$label]: $recognizedText"
-
-                        // Optional: Save results or trigger other actions
-//                        handleOCRResult(label, recognizedText, bbox)
                     } else {
-                        Log.i("OCR", "No text found in $label bounding box")
+                        Log.i("OCR", "No text found in $label (${ocrTime}ms)")
                     }
                 }
             }
+
+            val totalTime = SystemClock.uptimeMillis() - decodeStart
+
+            Log.i(
+                "TIMING",
+                "Total: ${totalTime}ms (decode: ${decodeTime}ms, YOLO: ${yoloTime}ms, OCR: ${totalOcrTime}ms for ${ocrCount} objects)"
+            )
+
+            if (totalTime > 500) {
+                Log.w("PERFORMANCE", "⚠️ Processing took > 500ms - client falling behind!")
+            }
+
         } finally {
-            // Clean up bitmap to prevent memory leaks
             bitmap.recycle()
         }
     }
-
     /**
      * Determine if OCR should run for this detection class
      */
@@ -267,7 +400,8 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun connect() {
-        webSocketClient.setSocketUrl("ws://192.168.1.3:8080")
+//        webSocketClient.setSocketUrl("ws://192.168.1.3:8080")
+        webSocketClient.setSocketUrl("ws://10.42.0.1:8080")
         webSocketClient.connect()
         webSocketClient.sendMessage("start")
         _isSocketConnected.value = true

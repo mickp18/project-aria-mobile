@@ -2,8 +2,10 @@ package com.example.projectariamobile
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.Rect
-
 import android.util.Log
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.Text
@@ -11,92 +13,98 @@ import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.TextRecognizer
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import kotlinx.coroutines.tasks.await
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
 
+class TextRecognitionProcessor(private val context: Context) {
 
-/** Processor for the text detector. */
-class TextRecognitionProcessor(private val context: Context){
+    private val textRecognizer: TextRecognizer =
+        TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
 
-    private val textRecognizer: TextRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+    // Paint for the bounding box
+    private val rectPaint = Paint().apply {
+        color = Color.RED
+        style = Paint.Style.STROKE
+        strokeWidth = 4.0f
+    }
 
     /**
-    * Crop bitmap based on bounding box and run OCR
-    * @param bitmap Original image
-    * @param boundingBox Rectangle defining the crop area
-    * @return Recognized text or null if failed
-    */
+     * 1. Crops the bitmap.
+     * 2. Runs OCR on the crop.
+     * 3. Draws bounding boxes ON THE CROP.
+     * 4. Saves the annotated CROP.
+     */
     suspend fun recognizeTextInBoundingBox(
-        bitmap: Bitmap,
+        originalBitmap: Bitmap,
         boundingBox: Rect,
         detectionClass: String? = null
+
     ): String? {
         return try {
-            // Validate bounding box is within bitmap bounds
-            val validBox = validateAndClampBoundingBox(bitmap, boundingBox)
+            // 1. Crop the original image
+            var scaledBitmap: Bitmap? = null
+            var binarizedBitmap: Bitmap? = null
+            var croppedBitmap: Bitmap? = null
 
-            // Crop the bitmap to the bounding box
-            val croppedBitmap = cropBitmap(bitmap, validBox)
+
+            val validCropRect = validateAndClampBoundingBox(originalBitmap, boundingBox)
+            croppedBitmap = cropBitmap(originalBitmap, validCropRect)
+
+            // scale bitmap if too small
+            scaledBitmap = if (croppedBitmap.height < 100) {
+                Log.d("TextRecognizer", "Upscaling image (Height: ${croppedBitmap.height})")
+                scaleBitmap(croppedBitmap, 2.0f)
+            } else {
+                // No scaling needed, just use the cropped one
+                croppedBitmap
+            }
+//            binarizedBitmap = binarizeBitmap(scaledBitmap)
+
+            // 2. Run OCR directly on the crop
+            val mlKitTextResult = performOCR(croppedBitmap)
+
+            if (mlKitTextResult == null || mlKitTextResult.text.isBlank()) {
+                Log.d("TextRecognizer", "No text found in crop.")
+                // Recycle if created
+                if (croppedBitmap != originalBitmap) croppedBitmap.recycle()
+                return null
+            }
+
+            // 3. Draw results directly onto the cropped bitmap
+            // No offset math needed because ML Kit coordinates match the crop exactly
+            val annotatedCrop = drawDetectionResults(croppedBitmap, mlKitTextResult.textBlocks)
+
+            // 4. Save the ANNOTATED CROP
             val className = detectionClass ?: "unknown"
+            // Note: Ensure saveBitmapToGallery is defined in your project
             val saved = saveBitmapToGallery(
                 context,
-                croppedBitmap,
-                fileName = "CROP_${className}_${System.currentTimeMillis()}.jpg",
+                annotatedCrop, // Saving the drawn-over crop
+                fileName = "CROP_ANNOTATED_${className}_${System.currentTimeMillis()}.jpg",
                 folderName = "OCR_Test_Crops"
             )
-            if (saved) {
-                Log.i("TextRecognizer", "Cropped image saved for class: $className")
-            } else {
-                Log.e("TextRecognizer", "Failed to save cropped image")
-            }
 
-            // Run OCR on cropped region
-//            val text = null
-            val text = recognizeText(croppedBitmap)
+            if (saved) {
+                Log.i("TextRecognizer", "Annotated crop saved: $className")
+            }
 
             // Clean up
-            if (croppedBitmap != bitmap) {
-                croppedBitmap.recycle()
-            }
-            text
+            if (croppedBitmap != originalBitmap) croppedBitmap?.recycle()
+            if (scaledBitmap != croppedBitmap) scaledBitmap?.recycle()
+            if (binarizedBitmap != scaledBitmap) binarizedBitmap?.recycle()
+
+            mlKitTextResult.text
+
         } catch (e: Exception) {
             Log.e("TextRecognizer", "Error recognizing text: ${e.message}", e)
             null
         }
     }
-    /**
-     * Run OCR on full bitmap
-     */
-    suspend fun recognizeText(bitmap: Bitmap): String? {
+
+    private suspend fun performOCR(bitmap: Bitmap): Text? {
         return try {
             val image = InputImage.fromBitmap(bitmap, 0)
-            val result = textRecognizer.process(image)
-                .addOnSuccessListener { visionText ->
-                    val resultText = visionText.text
-                    if (resultText.isNotBlank()) {
-                        Log.d("TextRecognizer", "Recognized text: $resultText")
-                    } else {
-                        Log.d("TextRecognizer", "No text found")
-                    }
-                }
-                .addOnFailureListener { e ->
-                    Log.e("textrecognizer", e.message.toString())
-                }
-                .await()
-
-            for ( block in  result.textBlocks){
-                Log.i("textrecognizer", "${block.text}")
-            }
-            // Extract all text blocks
-            val extractedText = result.textBlocks.joinToString("\n") { block ->
-                block.text
-            }
-
-            if (extractedText.isNotBlank()) {
-                //Log.d("TextRecognizer", "Recognized text: $extractedText")
-                extractedText
-            } else {
-                //Log.d("TextRecognizer", "No text found")
-                null
-            }
+            textRecognizer.process(image).await()
         } catch (e: Exception) {
             Log.e("TextRecognizer", "OCR failed: ${e.message}", e)
             null
@@ -104,36 +112,28 @@ class TextRecognitionProcessor(private val context: Context){
     }
 
     /**
-     * Get detailed OCR results with confidence and position
+     * Draws bounding boxes onto the provided bitmap.
      */
-//    suspend fun recognizeTextDetailed(bitmap: Bitmap): List<TextBlock>? {
-//        return try {
-//            val image = InputImage.fromBitmap(bitmap, 0)
-//            val result = textRecognizer.process(image).await()
-//
-//            result.textBlocks.map { block ->
-//                TextBlock(
-//                    text = block.text,
-//                    confidence = block. ?: 0f,
-//                    boundingBox = block.boundingBox,
-//                    lines = block.lines.map { line ->
-//                        TextLine(
-//                            text = line.text,
-//                            confidence = line.confidence ?: 0f,
-//                            boundingBox = line.boundingBox
-//                        )
-//                    }
-//                )
-//            }
-//        } catch (e: Exception) {
-//            Log.e("TextRecognizer", "Detailed OCR failed: ${e.message}", e)
-//            null
-//        }
-//    }
+    private fun drawDetectionResults(
+        bitmap: Bitmap,
+        textBlocks: List<Text.TextBlock>
+    ): Bitmap {
+        // Create a mutable copy so we can draw on it
+        val mutableBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, true)
+        val canvas = Canvas(mutableBitmap)
 
-    /**
-     * Crop bitmap to bounding box
-     */
+        for (block in textBlocks) {
+            val box = block.boundingBox
+            if (box != null) {
+                // Direct drawing: The box coordinates from ML Kit match the bitmap exactly
+                canvas.drawRect(box, rectPaint)
+            }
+        }
+        return mutableBitmap
+    }
+
+    // --- Helper Utils ---
+
     private fun cropBitmap(bitmap: Bitmap, boundingBox: Rect): Bitmap {
         return try {
             Bitmap.createBitmap(
@@ -144,46 +144,79 @@ class TextRecognitionProcessor(private val context: Context){
                 boundingBox.height()
             )
         } catch (e: Exception) {
-            Log.e("TextRecognizer", "Crop failed, using original: ${e.message}")
+            Log.e("TextRecognizer", "Crop failed: ${e.message}")
             bitmap
         }
     }
-    /**
-     * Ensure bounding box is within bitmap bounds
-     */
+
     private fun validateAndClampBoundingBox(bitmap: Bitmap, box: Rect): Rect {
         val left = box.left.coerceIn(0, bitmap.width - 1)
         val top = box.top.coerceIn(0, bitmap.height - 1)
         val right = box.right.coerceIn(left + 1, bitmap.width)
         val bottom = box.bottom.coerceIn(top + 1, bitmap.height)
 
+        if (left >= right || top >= bottom) {
+            return Rect(0,0, bitmap.width, bitmap.height)
+        }
         return Rect(left, top, right, bottom)
     }
-
     /**
-     * Clean up resources
+     * Scales the bitmap by a factor (e.g., 2.0 = 200% size).
+     * Uses bilinear filtering which is "good enough" for OCR upscaling.
      */
+    private fun scaleBitmap(bitmap: Bitmap, factor: Float): Bitmap {
+        val width = (bitmap.width * factor).toInt()
+        val height = (bitmap.height * factor).toInt()
+        // filter = true enables bilinear filtering for smoother edges
+        return Bitmap.createScaledBitmap(bitmap, width, height, true)
+    }
+    /**
+     * Converts a bitmap to a high-contrast Black and White image.
+     * This removes colored noise and shadows.
+     */
+    private fun binarizeBitmap(src: Bitmap): Bitmap {
+        val width = src.width
+        val height = src.height
+
+        // 1. Create a bitmap to draw on
+        val dest = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(dest)
+        val paint = Paint()
+
+        // 2. Create a ColorMatrix that converts to Grayscale AND increases Contrast
+        // The standard grayscale matrix:
+        // [ 0.33  0.59  0.11  0  0 ]
+        // To make it "Binarized" (Threshold), we multiply these by a large factor (contrast)
+        // and subtract a large offset (brightness) to push grays to 0 or 255.
+        // Formula: Pixel = (Color * Contrast) + Offset
+        val contrast = 2.0f // Scale factor > 1 increases contrast
+        val offset = -100.0f // Shift darks to black
+
+        val colorMatrix = ColorMatrix(floatArrayOf(
+            contrast, 0f, 0f, 0f, offset,  // Red
+            0f, contrast, 0f, 0f, offset,  // Green
+            0f, 0f, contrast, 0f, offset,  // Blue
+            0f, 0f, 0f, 1f, 0f             // Alpha
+        ))
+
+        // 3. Apply the filter (Grayscale is implicit if we use R=G=B inputs,
+        // but explicit Grayscale + High Contrast usually works best)
+        val grayscaleMatrix = ColorMatrix()
+        grayscaleMatrix.setSaturation(0f) // First turn to gray
+
+        // Combine: Gray -> Contrast
+        grayscaleMatrix.postConcat(colorMatrix)
+
+        paint.colorFilter = ColorMatrixColorFilter(grayscaleMatrix)
+        canvas.drawBitmap(src, 0f, 0f, paint)
+
+        return dest
+    }
     fun stop() {
         try {
             textRecognizer.close()
-            Log.d("TextRecognizer", "TextRecognizer closed")
         } catch (e: Exception) {
-            Log.e("TextRecognizer", "Error closing recognizer: ${e.message}")
+            Log.e("TextRecognizer", "Error closing: ${e.message}")
         }
     }
-
-    // Data classes for structured results
-    data class TextBlock(
-        val text: String,
-        val confidence: Float,
-        val boundingBox: Rect?,
-        val lines: List<TextLine>
-    )
-
-    data class TextLine(
-        val text: String,
-        val confidence: Float,
-        val boundingBox: Rect?
-    )
-
 }

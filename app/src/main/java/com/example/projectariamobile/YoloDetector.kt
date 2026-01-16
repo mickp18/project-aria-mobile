@@ -12,7 +12,7 @@ import com.ultralytics.yolo.predict.detect.TfliteDetector
 class YoloDetector(
     var confidenceThreshold: Float = 0.5f,
     var iouThreshold: Float = 0.3f,
-    var numThreads: Int = 2,
+    var numThreads: Int = 4,
     var maxResults: Int = 3,
     var currentDelegate: Int = 0,
     val context: Context
@@ -30,6 +30,11 @@ class YoloDetector(
 
         val modelPath = "best_float32.tflite"
         val metadataPath = "metadata.yaml"
+//        val modelPath = "yolo11n_float32.tflite"
+//        val metadataPath = "metadata_basemodel.yaml"
+//        val modelPath = "yolo11n_float32_800.tflite"
+//        val metadataPath = "metadata_basemodel800.yaml"
+
 
         val config = LocalYoloModel(
             "detect",
@@ -104,7 +109,7 @@ class YoloDetector(
         }
 
         val ret = DetectionResult(ppImage, detections)
-        ret.info = yolo.stats
+//        ret.info = yolo.stats
         return ret
 
     }
