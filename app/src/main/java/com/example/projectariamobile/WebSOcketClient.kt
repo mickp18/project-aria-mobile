@@ -18,7 +18,8 @@ class WebSocketClient {
         .readTimeout(0, TimeUnit.MILLISECONDS)      // CRITICAL: No timeout for streaming
         .connectTimeout(10, TimeUnit.SECONDS)       // Initial connection timeout
         .pingInterval(20, TimeUnit.SECONDS)         // Keep-alive ping every 20s
-        .retryOnConnectionFailure(true)             // Auto-retry on network issues
+        .retryOnConnectionFailure(true)    // Auto-retry on network issues
+        .callTimeout(0, TimeUnit.MILLISECONDS)      // No call timeout
         .build()
 
     companion object {
