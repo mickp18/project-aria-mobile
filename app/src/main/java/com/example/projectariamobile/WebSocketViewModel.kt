@@ -46,6 +46,8 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     private var totalFrames = 0
     private var lastStatsTime = SystemClock.uptimeMillis()
 
+    private var destination : String = ""
+
     init {
         webSocketClient.setListener(object : WebSocketClient.SocketListener {
             override fun onMessage(message: String) {
@@ -172,9 +174,15 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         Log.i("FINAL_STATS", "Session ended: ${totalFrames} frames in ${String.format("%.1f", totalElapsed)}s (avg ${String.format("%.1f", avgFps)} FPS)")
     }
 
+    fun setDestination(command : String){
+        destination = command
+    }
+
+
     override fun onCleared() {
         super.onCleared()
         disconnect()
         _isSocketConnected.value = false
+        destination = ""
     }
 }
