@@ -24,11 +24,24 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicBoolean
 
+
+
+sealed class ConnectionStatus {
+    object DISCONNECTED : ConnectionStatus()
+    object CONNECTING : ConnectionStatus()
+    object CONNECTED : ConnectionStatus()
+    data class FAILED(val error: String) : ConnectionStatus()
+}
+
 class WebSocketViewModel(application: Application) : AndroidViewModel(application) {
     private val webSocketClient = WebSocketClient.getInstance()
 
     private val _isSocketConnected = MutableStateFlow(false)
     val isSocketConnected: StateFlow<Boolean> = _isSocketConnected.asStateFlow()
+
+    // NEW: Connection status flow
+    private val _connectionStatus = MutableStateFlow<ConnectionStatus>(ConnectionStatus.DISCONNECTED)
+    val connectionStatus: StateFlow<ConnectionStatus> = _connectionStatus.asStateFlow()
 
     private val _messages = MutableStateFlow("")
     val messages: StateFlow<String> = _messages
@@ -48,6 +61,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
 
     private var destination : String = ""
 
+
     init {
         webSocketClient.setListener(object : WebSocketClient.SocketListener {
             override fun onMessage(message: String) {
@@ -66,6 +80,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                             Log.d("socketCheck", "Status: $status, reason: $reason")
                             if (status == "stopped") {
                                 _isSocketConnected.value = false
+                                _connectionStatus.value = ConnectionStatus.DISCONNECTED
                                 _messages.value = "Server stopped: ${payload.optString("reason")}"
                                 webSocketClient.disconnect()
                                 Log.i("socketCheck", "Received stopped signal")
@@ -116,6 +131,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                 Log.i("socketCheck", "✓ Connection opened")
                 _messages.value = "Socket Opened"
                 _isSocketConnected.value = true
+                _connectionStatus.value = ConnectionStatus.CONNECTED  // NEW: Update status
 
                 // Reset counters
                 frameCount = 0
@@ -127,6 +143,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
 
             override fun onError(error: String) {
                 _isSocketConnected.value = false
+                _connectionStatus.value = ConnectionStatus.FAILED(error)  // NEW: Update status with error
                 _messages.value = "Connection Failed: $error"
                 Log.e("socketCheck", "✗ Error: $error")
             }
@@ -157,16 +174,26 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun connect() {
+       // Set status to CONNECTING before attempting connection
+        _connectionStatus.value = ConnectionStatus.CONNECTING
+        Log.d("socketCheck", "Attempting to connect...")
+
         webSocketClient.setSocketUrl("ws://10.42.0.1:8080")
         webSocketClient.connect()
+
+
         webSocketClient.sendMessage("start")
-        _isSocketConnected.value = true
+
+        // Note: _isSocketConnected and _connectionStatus will be updated in onOpen() or onError()
+        // Don't set _isSocketConnected to true here - wait for actual connection
     }
 
     fun disconnect() {
+        Log.d("socketCheck", "Disconnecting...")
         webSocketClient.sendMessage("stop")
         webSocketClient.disconnect()
         _isSocketConnected.value = false
+        _connectionStatus.value = ConnectionStatus.DISCONNECTED  // NEW: Update status
 
         // Print final stats
         val totalElapsed = (SystemClock.uptimeMillis() - firstFrameTime) / 1000.0
@@ -176,13 +203,27 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun setDestination(command : String){
         destination = command
+        Log.d("socketCheck", "Destination set to: $command")
     }
 
+    // Helper function to check if currently connecting
+    fun isConnecting(): Boolean {
+        return _connectionStatus.value is ConnectionStatus.CONNECTING
+    }
+
+    // Helper function to get error message if failed
+    fun getConnectionError(): String? {
+        return when (val status = _connectionStatus.value) {
+            is ConnectionStatus.FAILED -> status.error
+            else -> null
+        }
+    }
 
     override fun onCleared() {
         super.onCleared()
         disconnect()
         _isSocketConnected.value = false
+        _connectionStatus.value = ConnectionStatus.DISCONNECTED  // NEW: Update status
         destination = ""
     }
 }
