@@ -299,7 +299,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
     }
 
     private fun finalizeGoal() {
-        // stopVosk()
+        stopVosk()
         Log.d("VOICE_FLOW", "Finalizing goal: $pendingGoal")
         isVoiceFlowActive = false
         isWaitingForConfirmation = false
