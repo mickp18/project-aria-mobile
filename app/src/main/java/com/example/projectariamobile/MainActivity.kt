@@ -162,12 +162,12 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
                         runOnUiThread {
                             when (utteranceId) {
                                 "GOAL_PROMPT", "CONFIRM_PROMPT" -> {
-                                    // Post a delay of 200ms before starting the mic
+                                    // Post a delay of 100ms before starting the mic
                                     android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
                                         if (!tts.isSpeaking) { // Extra safety check
                                             startVoskListening()
                                         }
-                                    }, 200)
+                                    }, 100)
                                 }
                             }
                         }
@@ -204,8 +204,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
     override fun onResult(hypothesis: String) {
         val text = JSONObject(hypothesis).optString("text", "")
         if (text.isEmpty()) {
-            // If we heard nothing, we need to decide if we re-enable
-            // the mic or just wait.
+            // If we heard nothing, we wait
             return
         }
         if (text == "stop" && webSocketViewModel.isSocketConnected.value == true){
