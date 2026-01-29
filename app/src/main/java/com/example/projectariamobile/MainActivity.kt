@@ -77,7 +77,11 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         }
 
         startButton.setOnClickListener { checkPermissionAndStart() }
-        stopButton.setOnClickListener { webSocketViewModel.disconnect() }
+        stopButton.setOnClickListener {
+            webSocketViewModel.disconnect()
+            isAwaitingWakeWord = true
+            startBackgroundListening()
+        }
     }
 
     private fun initVoskModels() {
@@ -112,6 +116,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
 
     // Put app in "wake mode"
     private fun startBackgroundListening() {
+        Log.d("LISTENER", "Waiting for start/stop command")
         stopVosk() // Ensure clean state
         isAwaitingWakeWord = true
         isVoiceFlowActive = false
@@ -324,7 +329,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
                         showConnectionFailureDialog()
                     }
                 }
-                else -> { /* Ignore other states like CONNECTING */ }
+                else -> {  }
             }
         }
     }
