@@ -337,7 +337,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             )
 
             if (totalTime > 500) {
-                Log.w("PERFORMANCE", "⚠️ Processing took > 500ms - client falling behind!")
+                Log.w("PERFORMANCE", "Processing took > 500ms - client falling behind!")
             }
 
         } finally {
