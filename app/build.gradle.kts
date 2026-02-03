@@ -7,6 +7,7 @@ android {
     namespace = "com.example.projectariamobile"
     compileSdk = 36
 
+
     defaultConfig {
         applicationId = "com.example.tutorial"
         minSdk = 33
@@ -22,6 +23,11 @@ android {
             abiFilters.add("x86_64")
         }
     }
+//    @Suppress("UnstableApiUsage")
+//    androidResources {
+//        // We include "uuid" and "" (empty extension) to be safe
+//        noCompress.addAll(listOf("tflite", "bundle", "pb", "am", "conf", "graph", "ivector", "uuid", ""))
+//    }
 
     buildTypes {
         release {
@@ -89,5 +95,7 @@ dependencies {
     // Lifecycle ViewModel with coroutines support
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.6.2")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.6.2")
+
+    implementation("com.alphacephei:vosk-android:0.3.47")
 }
 
