@@ -41,7 +41,7 @@ class TextRecognitionProcessor(private val context: Context) {
 
     ): String? {
         return try {
-            // 1. Crop the original image
+            // Crop the original image
             var scaledBitmap: Bitmap? = null
             var binarizedBitmap: Bitmap? = null
             var croppedBitmap: Bitmap? = null
@@ -60,7 +60,7 @@ class TextRecognitionProcessor(private val context: Context) {
             }
 //            binarizedBitmap = binarizeBitmap(scaledBitmap)
 
-            // 2. Run OCR directly on the crop
+            // Run OCR directly on the crop
             val mlKitTextResult = performOCR(croppedBitmap)
 
             if (mlKitTextResult == null || mlKitTextResult.text.isBlank()) {
@@ -70,13 +70,13 @@ class TextRecognitionProcessor(private val context: Context) {
                 return null
             }
 
-            // 3. Draw results directly onto the cropped bitmap
+            // Draw results directly onto the cropped bitmap
             // No offset math needed because ML Kit coordinates match the crop exactly
             val annotatedCrop = drawDetectionResults(croppedBitmap, mlKitTextResult.textBlocks)
 
-            // 4. Save the ANNOTATED CROP
+            // Save the ANNOTATED CROP
             val className = detectionClass ?: "unknown"
-            // Note: Ensure saveBitmapToGallery is defined in your project
+            // Ensure saveBitmapToGallery is defined in your project
             val saved = saveBitmapToGallery(
                 context,
                 annotatedCrop, // Saving the drawn-over crop
@@ -178,12 +178,12 @@ class TextRecognitionProcessor(private val context: Context) {
         val width = src.width
         val height = src.height
 
-        // 1. Create a bitmap to draw on
+        // Create a bitmap to draw on
         val dest = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(dest)
         val paint = Paint()
 
-        // 2. Create a ColorMatrix that converts to Grayscale AND increases Contrast
+        // Create a ColorMatrix that converts to Grayscale AND increases Contrast
         // The standard grayscale matrix:
         // [ 0.33  0.59  0.11  0  0 ]
         // To make it "Binarized" (Threshold), we multiply these by a large factor (contrast)
@@ -199,7 +199,7 @@ class TextRecognitionProcessor(private val context: Context) {
             0f, 0f, 0f, 1f, 0f             // Alpha
         ))
 
-        // 3. Apply the filter (Grayscale is implicit if we use R=G=B inputs,
+        // Apply the filter (Grayscale is implicit if we use R=G=B inputs,
         // but explicit Grayscale + High Contrast usually works best)
         val grayscaleMatrix = ColorMatrix()
         grayscaleMatrix.setSaturation(0f) // First turn to gray

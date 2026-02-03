@@ -172,6 +172,227 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    /**
+     * Process incoming video frame: run YOLO detection and OCR if needed
+     */
+//    private suspend fun processFrame(bytes: ByteArray) {
+//        // Decode bitmap
+//        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+//
+//        if (bitmap == null) {
+//            Log.e("socketCheck", "Failed to decode bitmap")
+//            return
+//        }
+//        var count = 0
+//        try {
+////            val save_orig = saveBitmapToGallery(
+////                application,
+////                bitmap,
+////                fileName = "ORIGINAL_${count}_${System.currentTimeMillis()}.jpg",
+////                folderName = "YOLO_DETECTIONS"
+////            )
+////            if (save_orig) {
+////                Log.i("TextRecognizer", "saved frame number: $count ")
+////            } else {
+////                Log.e("TextRecognizer", "Failed to save cropped image")
+////            }
+////            count = count +1
+//            // Run YOLO detection
+//            var startTime = SystemClock.uptimeMillis()
+//            val results = yoloDetector.detect(bitmap, 0)
+//            val endTime = SystemClock.uptimeMillis()
+//
+//            val inferanceTime = endTime - startTime
+//            Log.i(
+//                "YOLO",
+//                "Found in $inferanceTime ms"
+//            )
+//
+//            if (results.detections.isEmpty()) {
+//                Log.i("YOLO", "No detections on frame; $count")
+//                return
+//            }
+//            count = count + 1
+//
+//            // Process each detection
+//            for (detection in results.detections) {
+//                val label = detection.category.label.lowercase()
+//                val bbox = detection.boundingBox
+//
+//
+//                Log.i(
+//                    "YOLO",
+//                    "Found $label at ${bbox} (confidence: ${detection.category.confidence})"
+//                )
+//
+//                val saved = saveBitmapToGallery(
+//                    application,
+//                    bitmap,
+//                    fileName = "ORIGINAL_${label}_${System.currentTimeMillis()}.jpg",
+//                    folderName = "YOLO_DETECTIONS"
+//                )
+////                if (saved) {
+////                    Log.i("TextRecognizer", "Cropped image saved for class: $label")
+////                } else {
+////                    Log.e("TextRecognizer", "Failed to save cropped image")
+////                }
+//
+//                // Check if this detection should trigger OCR
+//                if (shouldRunOCR(label)) {
+//                    Log.i("OCR", "Running OCR on detected $label")
+//
+//                    // Convert RectF to Rect for cropping
+//                    val cropRect = Rect(
+//                        bbox.left.toInt(),
+//                        bbox.top.toInt(),
+//                        bbox.right.toInt(),
+//                        bbox.bottom.toInt()
+//                    )
+//                    startTime = SystemClock.uptimeMillis()
+//                    // Run OCR on the bounding box
+//                    val recognizedText = textRecognizer.recognizeTextInBoundingBox(
+//                        bitmap,
+//                        cropRect,
+//                        label
+//                    )
+//                    val ocrTime = SystemClock.uptimeMillis() - startTime
+//                    Log.i("tOCR", "OCR executed in $ocrTime")
+//                    if (recognizedText != null) {
+//                        Log.i("OCR", "Recognized text in $label: $recognizedText")
+//
+//                        // Update UI with OCR result
+//                        _ocrResults.value = "[$label]: $recognizedText"
+//
+//                        // Optional: Save results or trigger other actions
+////                        handleOCRResult(label, recognizedText, bbox)
+//                    } else {
+//                        Log.i("OCR", "No text found in $label bounding box")
+//                    }
+//                }
+//            }
+//        } finally {
+//            // Clean up bitmap to prevent memory leaks
+//            bitmap.recycle()
+//        }
+//    }
+    private suspend fun processFrame(bytes: ByteArray) {
+        val decodeStart = SystemClock.uptimeMillis()
+        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return
+        val decodeTime = SystemClock.uptimeMillis() - decodeStart
+
+        try {
+            Log.d("TIMING", "Decode: ${decodeTime}ms")
+
+            val yoloStart = SystemClock.uptimeMillis()
+            val results = yoloDetector.detect(bitmap, 0)
+            val yoloTime = SystemClock.uptimeMillis() - yoloStart
+            Log.i("YOLO", "Detection completed in ${yoloTime}ms, found ${results.detections.size} objects")
+
+            var totalOcrTime = 0L
+            var ocrCount = 0
+
+            for (detection in results.detections) {
+                val label = detection.category.label.lowercase()
+                val confidence = detection.category.confidence
+                var bbox= detection.boundingBox
+
+                Log.i(
+                    "YOLO",
+                    "Detected: $label (${String.format("%.2f", confidence)}) at [${bbox.left.toInt()},${bbox.top.toInt()},${bbox.right.toInt()},${bbox.bottom.toInt()}]"
+                )
+
+                if (shouldRunOCR(label)) {
+                    ocrCount++
+                    val cropRect = Rect(
+                        bbox.left.toInt(),
+                        bbox.top.toInt(),
+                        bbox.right.toInt(),
+                        bbox.bottom.toInt()
+                    )
+                    val ocrStart = SystemClock.uptimeMillis()
+                    val recognizedText = textRecognizer.recognizeTextInBoundingBox(bitmap, cropRect, label)
+                    val ocrTime = SystemClock.uptimeMillis() - ocrStart
+                    totalOcrTime += ocrTime
+
+                    if (recognizedText != null) {
+                        Log.i("OCR", "Recognized in ${ocrTime}ms: [$label] = $recognizedText")
+                        _ocrResults.value = "[$label]: $recognizedText"
+                    } else {
+                        Log.i("OCR", "No text found in $label (${ocrTime}ms)")
+                    }
+                }
+            }
+
+            val totalTime = SystemClock.uptimeMillis() - decodeStart
+
+            Log.i(
+                "TIMING",
+                "Total: ${totalTime}ms (decode: ${decodeTime}ms, YOLO: ${yoloTime}ms, OCR: ${totalOcrTime}ms for ${ocrCount} objects)"
+            )
+
+            if (totalTime > 500) {
+                Log.w("PERFORMANCE", "Processing took > 500ms - client falling behind!")
+            }
+
+        } finally {
+            bitmap.recycle()
+        }
+    }
+    /**
+     * Determine if OCR should run for this detection class
+     */
+    private fun shouldRunOCR(detectionLabel: String): Boolean {
+        return ocrTargetClasses.any { target ->
+            detectionLabel.contains(target, ignoreCase = true)
+        }
+    }
+
+    /**
+     * Handle OCR results - customize based on your needs
+     */
+//    private fun handleOCRResult(
+//        objectClass: String,
+//        text: String,
+//        boundingBox: android.graphics.RectF
+//    ) {
+//        // Example: Log to analytics
+//        Log.i("OCR_RESULT", "Class: $objectClass, Text: $text, BBox: $boundingBox")
+//
+//        // Example: Send to server
+//        // webSocketClient.sendMessage(createOCRResultMessage(objectClass, text))
+//
+//        // Example: Save to database
+//        // saveOCRResultToDatabase(objectClass, text, System.currentTimeMillis())
+//
+//        // Example: Trigger specific actions based on text content
+//        when (objectClass) {
+//            "license plate" -> handleLicensePlate(text)
+//            "sign" -> handleTrafficSign(text)
+//            "card" -> handleCard(text)
+//            else -> Log.d("OCR", "No specific handler for $objectClass")
+//        }
+//    }
+
+
+    private fun handleTrafficSign(signText: String) {
+        // Custom logic for traffic signs
+        Log.i("TRAFFIC_SIGN", "Detected sign: $signText")
+    }
+
+
+    /**
+     * Add or remove OCR target classes dynamically
+     */
+    fun addOCRTargetClass(className: String) {
+        (ocrTargetClasses as MutableSet).add(className.lowercase())
+        Log.d("OCR", "Added OCR target class: $className")
+    }
+
+    fun removeOCRTargetClass(className: String) {
+        (ocrTargetClasses as MutableSet).remove(className.lowercase())
+        Log.d("OCR", "Removed OCR target class: $className")
+    }
+
     fun connect() {
        // Set status to CONNECTING before attempting connection
         _connectionStatus.value = ConnectionStatus.CONNECTING
