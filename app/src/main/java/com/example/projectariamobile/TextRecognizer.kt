@@ -15,6 +15,7 @@ import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import kotlinx.coroutines.tasks.await
 import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
+import androidx.core.graphics.scale
 
 class TextRecognitionProcessor(private val context: Context) {
 
@@ -51,9 +52,9 @@ class TextRecognitionProcessor(private val context: Context) {
             croppedBitmap = cropBitmap(originalBitmap, validCropRect)
 
             // scale bitmap if too small
-            scaledBitmap = if (croppedBitmap.height < 100) {
+            scaledBitmap = if (croppedBitmap.height < 100 || croppedBitmap.width < 100) {
                 Log.d("TextRecognizer", "Upscaling image (Height: ${croppedBitmap.height})")
-                scaleBitmap(croppedBitmap, 2.0f)
+                scaleBitmap(croppedBitmap, 5.0f)
             } else {
                 // No scaling needed, just use the cropped one
                 croppedBitmap
@@ -61,7 +62,7 @@ class TextRecognitionProcessor(private val context: Context) {
 //            binarizedBitmap = binarizeBitmap(scaledBitmap)
 
             // Run OCR directly on the crop
-            val mlKitTextResult = performOCR(croppedBitmap)
+            val mlKitTextResult = performOCR(scaledBitmap)
 
             if (mlKitTextResult == null || mlKitTextResult.text.isBlank()) {
                 Log.d("TextRecognizer", "No text found in crop.")
@@ -168,7 +169,9 @@ class TextRecognitionProcessor(private val context: Context) {
         val width = (bitmap.width * factor).toInt()
         val height = (bitmap.height * factor).toInt()
         // filter = true enables bilinear filtering for smoother edges
-        return Bitmap.createScaledBitmap(bitmap, width, height, true)
+        val scaled = bitmap.scale(width, height)
+        Log.d("TextRecognizer", "Scaled to-(Height: ${scaled.height})")
+        return scaled
     }
     /**
      * Converts a bitmap to a high-contrast Black and White image.
