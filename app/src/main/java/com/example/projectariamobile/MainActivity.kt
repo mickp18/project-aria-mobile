@@ -129,7 +129,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
 
         try {
             // Limited grammar for high accuracy wake-word detection
-            val grammar = "[\"start\", \"stop\"]"
+            val grammar = "[\"start\", \"stop\", \"cancel\" ]"
             val rec = Recognizer(voskModelEn, 16000.0f, grammar)
             speechService = SpeechService(rec, 16000.0f)
             speechService?.startListening(this)
@@ -210,6 +210,11 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         val text = JSONObject(hypothesis).optString("text", "")
         if (text.isEmpty()) {
             // If we heard nothing, we wait
+            return
+        }
+        if (text == "cancel"){
+            stopVosk()
+            startBackgroundListening()
             return
         }
         if (text == "stop" && webSocketViewModel.isSocketConnected.value == true){
