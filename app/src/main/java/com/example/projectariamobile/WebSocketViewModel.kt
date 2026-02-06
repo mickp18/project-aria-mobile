@@ -1,5 +1,6 @@
 package com.example.projectariamobile
 
+import android.annotation.SuppressLint
 import android.app.Application
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -53,12 +54,40 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     val frameStats: StateFlow<String> = _frameStats.asStateFlow()
 
     private var frameCount = 0
+    private var droppedFrames = 0
     private var lastFrameTime = 0L
     private var firstFrameTime = 0L
     private var totalFrames = 0
     private var lastStatsTime = SystemClock.uptimeMillis()
 
     private var destination : String = ""
+
+    private val isProcessing = AtomicBoolean(false)
+    val threshold = 0.5f
+    val numThreads = 2
+    val currentDelegate = 0
+    val maxResults = 3
+
+    // YOLO detector
+    val yoloDetector: YoloDetector = YoloDetector(
+        threshold,
+        0.3f,
+        numThreads,
+        maxResults,
+        currentDelegate,
+        application,
+    )
+
+    // OCR text recognizer
+    private val textRecognizer = TextRecognitionProcessor(application)
+
+    // Classes that should trigger OCR (configure as needed)
+    private val ocrTargetClasses = setOf(
+        "room",
+        "direction_left",
+        "direction_right",
+        "stairs",
+    )
 
 
     init {
@@ -96,6 +125,13 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                 frameCount++
                 totalFrames++
 
+                if (isProcessing.get()) {
+                    droppedFrames++
+                    Log.d("socketCheck", "Dropped frame (still processing previous)")
+                    updateStats()
+                    return
+                }
+
                 // Record first frame time for average FPS calculation
                 if (firstFrameTime == 0L) {
                     firstFrameTime = receiveTime
@@ -115,8 +151,22 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
 
                 lastFrameTime = receiveTime
                 viewModelScope.launch(Dispatchers.Default) {
-                    processFrame()
-//                    updateStats()
+                    if (isProcessing.compareAndSet(false, true)) {
+                        try {
+                            val frameSize = bytes.size / 1024.0
+                            Log.i("socketCheck", "Processing frame ${frameCount}: ${String.format("%.1f", frameSize)}KB")
+
+                            var start = SystemClock.uptimeMillis()
+                            processFrame(bytes)
+                            var end = SystemClock.uptimeMillis()
+                            Log.i("socketCheck", "Frame processed in ${end - start} ms")
+                            updateStats()
+                        } catch (e: Throwable) {
+                            Log.e("socketCheck", "Error processing frame: ${e.localizedMessage}", e)
+                        } finally {
+                            isProcessing.set(false)
+                        }
+                    }
 
                 }
             }
@@ -134,6 +184,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
 
                 // Reset counters
                 frameCount = 0
+                droppedFrames=0
                 totalFrames = 0
                 lastFrameTime = 0L
                 firstFrameTime = 0L
@@ -149,6 +200,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         })
     }
 
+    @SuppressLint("DefaultLocale")
     private fun updateStats() {
         val currentTime = SystemClock.uptimeMillis()
         val elapsedSeconds = (currentTime - lastStatsTime) / 1000.0
@@ -156,10 +208,13 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         // Update stats every 5 seconds
         if (elapsedSeconds >= 5.0) {
             val fps = frameCount / elapsedSeconds
+            val dropRate = (droppedFrames.toFloat() / frameCount) * 100
             val totalElapsed = (currentTime - firstFrameTime) / 1000.0
             val avgFps = if (totalElapsed > 0) totalFrames / totalElapsed else 0.0
 
             _frameStats.value = String.format(
+                "FPS: %.1f | Received: %d | Dropped: %d (%.1f%%)",
+                fps, frameCount, droppedFrames, dropRate,
                 "Current FPS: %.1f | Avg FPS: %.1f | Total: %d frames",
                 fps, avgFps, totalFrames
             )
@@ -168,6 +223,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
 
             // Reset interval counter
             frameCount = 0
+            droppedFrames = 0
             lastStatsTime = currentTime
         }
     }
@@ -317,6 +373,9 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                     if (recognizedText != null) {
                         Log.i("OCR", "Recognized in ${ocrTime}ms: [$label] = $recognizedText")
                         _ocrResults.value = "[$label]: $recognizedText"
+                        if (_ocrResults.value?.contains("5T") == true ){
+                            Log.i("MATCH", "MATCH FOUND")
+                        }
                     } else {
                         Log.i("OCR", "No text found in $label (${ocrTime}ms)")
                     }
@@ -398,7 +457,8 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         _connectionStatus.value = ConnectionStatus.CONNECTING
         Log.d("socketCheck", "Attempting to connect...")
 
-        webSocketClient.setSocketUrl("ws://10.42.0.1:8080")
+        // webSocketClient.setSocketUrl("ws://10.42.0.1:8080")
+        webSocketClient.setSocketUrl("ws://192.168.1.98:8080")
         webSocketClient.connect()
 
 
@@ -421,6 +481,44 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         Log.i("FINAL_STATS", "Session ended: ${totalFrames} frames in ${String.format("%.1f", totalElapsed)}s (avg ${String.format("%.1f", avgFps)} FPS)")
     }
 
+    private fun saveBitmapToFile(bitmap: Bitmap) {
+        val context = getApplication<Application>().applicationContext
+        val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+        val fileName = "FRAME_$timeStamp.jpg"
+
+        val contentResolver = context.contentResolver
+        val contentValues = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+            put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                put(MediaStore.MediaColumns.RELATIVE_PATH, "Pictures/TutorialAppFrames")
+            }
+        }
+
+        val imageUri = contentResolver.insert(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+            contentValues
+        )
+
+        if (imageUri == null) {
+            Log.e("socketCheck", "Failed to create new MediaStore record.")
+            return
+        }
+
+        try {
+            contentResolver.openOutputStream(imageUri).use { out ->
+                if (out == null) {
+                    Log.e("socketCheck", "Failed to open output stream for $imageUri")
+                    return@use
+                }
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
+                Log.i("socketCheck", "Image saved successfully to gallery: $imageUri")
+            }
+        } catch (e: Exception) {
+            Log.e("socketCheck", "Error saving image to MediaStore", e)
+        }
+    }
+
     fun setDestination(command : String){
         destination = command
         Log.d("socketCheck", "Destination set to: $command")
@@ -436,6 +534,17 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         return when (val status = _connectionStatus.value) {
             is ConnectionStatus.FAILED -> status.error
             else -> null
+        }
+    }
+
+
+    class WebSocketViewModelFactory(private val application: Application) : ViewModelProvider.Factory {
+        override fun <T : ViewModel> create(modelClass: Class<T>): T {
+            if (modelClass.isAssignableFrom(WebSocketViewModel::class.java)) {
+                @Suppress("UNCHECKED_CAST")
+                return WebSocketViewModel(application) as T
+            }
+            throw IllegalArgumentException("Unknown ViewModel class")
         }
     }
 
