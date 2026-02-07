@@ -59,10 +59,11 @@ class TextRecognitionProcessor(private val context: Context) {
                 // No scaling needed, just use the cropped one
                 croppedBitmap
             }
-//            binarizedBitmap = binarizeBitmap(scaledBitmap)
+
+            binarizedBitmap = binarizeBitmap(scaledBitmap)
 
             // Run OCR directly on the crop
-            val mlKitTextResult = performOCR(scaledBitmap)
+            val mlKitTextResult = performOCR(binarizedBitmap)
 
             if (mlKitTextResult == null || mlKitTextResult.text.isBlank()) {
                 Log.d("TextRecognizer", "No text found in crop.")
@@ -173,6 +174,7 @@ class TextRecognitionProcessor(private val context: Context) {
         Log.d("TextRecognizer", "Scaled to-(Height: ${scaled.height})")
         return scaled
     }
+
     /**
      * Converts a bitmap to a high-contrast Black and White image.
      * This removes colored noise and shadows.
