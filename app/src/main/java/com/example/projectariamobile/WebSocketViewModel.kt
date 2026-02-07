@@ -60,7 +60,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     private var totalFrames = 0
     private var lastStatsTime = SystemClock.uptimeMillis()
 
-    private var destination : String = ""
+    var destination : String = ""
 
     private val isProcessing = AtomicBoolean(false)
     val threshold = 0.5f
@@ -167,7 +167,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                             isProcessing.set(false)
                         }
                     }
-
+                    Log.i("OnBinaryMessage", "------------------------")
                 }
             }
             private suspend fun processFrame() {
@@ -220,6 +220,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             )
 
             Log.i("STATS", _frameStats.value)
+            Log.i("STATS", "--------------------------------------------\n")
 
             // Reset interval counter
             frameCount = 0
@@ -372,8 +373,8 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
 
                     if (recognizedText != null) {
                         Log.i("OCR", "Recognized in ${ocrTime}ms: [$label] = $recognizedText")
-                        _ocrResults.value = "[$label]: $recognizedText"
-                        if (_ocrResults.value?.contains("5T") == true ){
+                        _ocrResults.value = "[$label]: ${recognizedText.lowercase()}"
+                        if (destination.isNotEmpty() && _ocrResults.value?.contains(destination) == true ){
                             Log.i("MATCH", "MATCH FOUND")
                         }
                     } else {
@@ -409,28 +410,20 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     /**
      * Handle OCR results - customize based on your needs
      */
-//    private fun handleOCRResult(
-//        objectClass: String,
-//        text: String,
-//        boundingBox: android.graphics.RectF
-//    ) {
-//        // Example: Log to analytics
-//        Log.i("OCR_RESULT", "Class: $objectClass, Text: $text, BBox: $boundingBox")
-//
-//        // Example: Send to server
-//        // webSocketClient.sendMessage(createOCRResultMessage(objectClass, text))
-//
-//        // Example: Save to database
-//        // saveOCRResultToDatabase(objectClass, text, System.currentTimeMillis())
-//
-//        // Example: Trigger specific actions based on text content
+    private fun handleOCRResult(
+        objectClass: String,
+        text: String,
+        boundingBox: android.graphics.RectF
+    ) {
+
+        // Example: Trigger specific actions based on text content
 //        when (objectClass) {
-//            "license plate" -> handleLicensePlate(text)
+//            "room" -> handleLicensePlate(text)
 //            "sign" -> handleTrafficSign(text)
 //            "card" -> handleCard(text)
 //            else -> Log.d("OCR", "No specific handler for $objectClass")
 //        }
-//    }
+    }
 
 
     private fun handleTrafficSign(signText: String) {
@@ -519,10 +512,10 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    fun setDestination(command : String){
-        destination = command
-        Log.d("socketCheck", "Destination set to: $command")
-    }
+//    fun setDestination(command : String){
+//        destination = command.lowercase()
+//        Log.d("socketCheck", "Destination set to: ${command.lowercase()}")
+//    }
 
     // Helper function to check if currently connecting
     fun isConnecting(): Boolean {

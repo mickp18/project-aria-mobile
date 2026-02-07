@@ -312,7 +312,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         val dataCommand = mapSpeechToCommand(pendingGoal)
         tts.speak("Confirmed, going to $dataCommand. Connecting.", TextToSpeech.QUEUE_FLUSH, null, null)
 
-        webSocketViewModel.setDestination(dataCommand)
+        webSocketViewModel.destination = dataCommand.lowercase()
 
         lifecycleScope.launch {
             webSocketViewModel.connect()
@@ -383,6 +383,15 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
                 if (!isVoiceFlowActive) {
                     startButton.isEnabled = !isConnected
                     stopButton.isEnabled = isConnected
+                }
+            }
+        }
+
+        lifecycleScope.launch{
+            webSocketViewModel.ocrResults.collect { result ->
+                val currentDest = webSocketViewModel.destination
+                if (result?.contains(currentDest, ignoreCase = true) == true) {
+                    tts.speak("Destination reached!", TextToSpeech.QUEUE_FLUSH, null, "DEST_FOUND")
                 }
             }
         }
