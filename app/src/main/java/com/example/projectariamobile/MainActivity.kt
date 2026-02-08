@@ -16,6 +16,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import org.json.JSONObject
@@ -218,10 +219,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
             return
         }
         if (text == "stop" && webSocketViewModel.isSocketConnected.value == true){
-            stopVosk()
-            webSocketViewModel.disconnect()
-            tts.speak("Disconnected, stopping...", TextToSpeech.QUEUE_FLUSH, null, null)
-            startBackgroundListening()
+            handleStop()
             return
         }
 
@@ -388,13 +386,27 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         }
 
         lifecycleScope.launch{
-            webSocketViewModel.ocrResults.collect { result ->
-                val currentDest = webSocketViewModel.destination
-                if (result?.contains(currentDest, ignoreCase = true) == true) {
-                    tts.speak("Destination reached!", TextToSpeech.QUEUE_FLUSH, null, "DEST_FOUND")
+            webSocketViewModel.navigationEvents.collect { event ->
+                when(event){
+                    is NavigationEvent.Speak -> {
+                        tts.speak(event.message, TextToSpeech.QUEUE_FLUSH, null, null)
+                    }
+                    is NavigationEvent.StopNavigation -> {
+                        // stop application
+                        Log.d("APP", "STOPPING APPLICATION\n")
+                        handleStop()
+                    }
                 }
+
+
             }
         }
+    }
+    private fun handleStop(){
+        stopVosk()
+        webSocketViewModel.disconnect()
+        tts.speak("Disconnected, stopping...", TextToSpeech.QUEUE_FLUSH, null, null)
+        startBackgroundListening()
     }
 
     private fun stopVosk() {
