@@ -22,9 +22,24 @@ import android.os.SystemClock
 import android.provider.MediaStore
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicBoolean
 
+
+data class detection(
+    var label : String = "",
+    var text : String = "",
+    var confidence : Float = 0.0f,
+    var bbox : android.graphics.RectF = android.graphics.RectF(),
+    var timeStamp : Long = System.currentTimeMillis()
+)
+
+sealed class NavigationEvent {
+    data class Speak(val message: String) : NavigationEvent()
+    object StopNavigation : NavigationEvent()
+}
 
 
 sealed class ConnectionStatus {
@@ -89,6 +104,16 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         "stairs",
     )
 
+    var detections = mutableListOf<detection>()
+    var lastResult = detection()
+    var lastInstruction : String = ""
+    var lastInstructionTime : Long = 0L
+    var matchCounter = 0
+    private val SPEECH_COOLDOWN = 3000L // 3 Seconds
+
+    // Channel for sending one-time events to MainActivity
+    private val _navigationEvents = MutableSharedFlow<NavigationEvent>()
+    val navigationEvents = _navigationEvents.asSharedFlow()
 
     init {
         webSocketClient.setListener(object : WebSocketClient.SocketListener {
@@ -348,10 +373,16 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             var totalOcrTime = 0L
             var ocrCount = 0
 
-            for (detection in results.detections) {
-                val label = detection.category.label.lowercase()
-                val confidence = detection.category.confidence
-                var bbox= detection.boundingBox
+            for (yoloDetection in results.detections) {
+                val label = yoloDetection.category.label.lowercase()
+                val confidence = yoloDetection.category.confidence
+                var bbox= yoloDetection.boundingBox
+
+                // create detection object to store global detection (yolo + ocr)
+                val detection = detection()
+                detection.label = label
+                detection.confidence = confidence
+                detection.bbox = bbox
 
                 Log.i(
                     "YOLO",
@@ -371,16 +402,16 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                     val ocrTime = SystemClock.uptimeMillis() - ocrStart
                     totalOcrTime += ocrTime
 
+
                     if (recognizedText != null) {
                         Log.i("OCR", "Recognized in ${ocrTime}ms: [$label] = $recognizedText")
-                        _ocrResults.value = "[$label]: ${recognizedText.lowercase()}"
-                        if (destination.isNotEmpty() && _ocrResults.value?.contains(destination) == true ){
-                            Log.i("MATCH", "MATCH FOUND")
-                        }
+                        // add text to detection
+                        detection.text = recognizedText.lowercase()
                     } else {
                         Log.i("OCR", "No text found in $label (${ocrTime}ms)")
                     }
                 }
+                handleDetection(detection)
             }
 
             val totalTime = SystemClock.uptimeMillis() - decodeStart
@@ -408,21 +439,74 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     /**
-     * Handle OCR results - customize based on your needs
+     * Handle YOLO+OCR results
      */
-    private fun handleOCRResult(
-        objectClass: String,
-        text: String,
-        boundingBox: android.graphics.RectF
-    ) {
+    fun handleDetection(detection : detection){
+        if (destination.isEmpty())
+            return
 
-        // Example: Trigger specific actions based on text content
-//        when (objectClass) {
-//            "room" -> handleLicensePlate(text)
-//            "sign" -> handleTrafficSign(text)
-//            "card" -> handleCard(text)
-//            else -> Log.d("OCR", "No specific handler for $objectClass")
-//        }
+        val currentTime = System.currentTimeMillis()
+        val isSpeaking = (currentTime - lastInstructionTime) < SPEECH_COOLDOWN
+        var compareText = false
+        var instruction : String = ""
+        var match = false
+
+       // check what sign was found
+        when (detection.label) {
+            "room" -> {
+                compareText = true
+                instruction = "Room found"
+            }
+
+            "direction_left" -> {
+                compareText = true
+                instruction = "Your destination is on the left"
+            }
+
+            "direction_right" -> {
+                compareText = true
+                instruction = "your destination is on the right"
+
+            }
+
+            "exit_left" -> {
+                instruction = "The nearest exit is on the left"
+
+            }
+
+            "exit_right" -> {
+                instruction = "The nearest exit is on the right"
+            }
+            // stairs
+            else -> {
+                compareText = true
+                instruction = "The destination is on the next floor above you, find the closest stairs"
+            }
+        }
+        
+        // if room, dir right, dir left -> check text
+        // if exit follow its direction
+        if (compareText) {
+            match = FuzzyLogic.isMatch(detection.text, destination)
+        }
+
+        if (match && !isSpeaking && lastInstruction!=instruction){
+            lastInstruction = instruction
+            lastInstructionTime = currentTime
+            viewModelScope.launch {
+                _navigationEvents.emit( NavigationEvent.Speak(instruction))
+            }
+
+            if (instruction.contains("found")){
+                viewModelScope.launch {
+                    _navigationEvents.emit(NavigationEvent.StopNavigation)
+                }
+            }
+
+        }
+
+
+
     }
 
 
