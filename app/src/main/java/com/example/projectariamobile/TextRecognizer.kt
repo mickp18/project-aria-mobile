@@ -49,18 +49,18 @@ class TextRecognitionProcessor(private val context: Context) {
 
 
             val validCropRect = validateAndClampBoundingBox(originalBitmap, boundingBox)
-            croppedBitmap = cropBitmap(originalBitmap, validCropRect)
+            croppedBitmap = originalBitmap.crop( validCropRect)
 
             // scale bitmap if too small
             scaledBitmap = if (croppedBitmap.height < 100 || croppedBitmap.width < 100) {
                 Log.d("TextRecognizer", "Upscaling image (Height: ${croppedBitmap.height})")
-                scaleBitmap(croppedBitmap, 5.0f)
+                croppedBitmap.scaleBitmap(5.0f)
             } else {
                 // No scaling needed, just use the cropped one
                 croppedBitmap
             }
 
-            binarizedBitmap = binarizeBitmap(scaledBitmap)
+            binarizedBitmap = scaledBitmap.binarizeBitmap()
 
             // Run OCR directly on the crop
             val mlKitTextResult = performOCR(binarizedBitmap)
@@ -134,22 +134,7 @@ class TextRecognitionProcessor(private val context: Context) {
         return mutableBitmap
     }
 
-    // --- Helper Utils ---
-
-    private fun cropBitmap(bitmap: Bitmap, boundingBox: Rect): Bitmap {
-        return try {
-            Bitmap.createBitmap(
-                bitmap,
-                boundingBox.left,
-                boundingBox.top,
-                boundingBox.width(),
-                boundingBox.height()
-            )
-        } catch (e: Exception) {
-            Log.e("TextRecognizer", "Crop failed: ${e.message}")
-            bitmap
-        }
-    }
+    // --- Helper Utils --
 
     private fun validateAndClampBoundingBox(bitmap: Bitmap, box: Rect): Rect {
         val left = box.left.coerceIn(0, bitmap.width - 1)
@@ -162,61 +147,7 @@ class TextRecognitionProcessor(private val context: Context) {
         }
         return Rect(left, top, right, bottom)
     }
-    /**
-     * Scales the bitmap by a factor (e.g., 2.0 = 200% size).
-     * Uses bilinear filtering which is "good enough" for OCR upscaling.
-     */
-    private fun scaleBitmap(bitmap: Bitmap, factor: Float): Bitmap {
-        val width = (bitmap.width * factor).toInt()
-        val height = (bitmap.height * factor).toInt()
-        // filter = true enables bilinear filtering for smoother edges
-        val scaled = bitmap.scale(width, height)
-        Log.d("TextRecognizer", "Scaled to-(Height: ${scaled.height})")
-        return scaled
-    }
 
-    /**
-     * Converts a bitmap to a high-contrast Black and White image.
-     * This removes colored noise and shadows.
-     */
-    private fun binarizeBitmap(src: Bitmap): Bitmap {
-        val width = src.width
-        val height = src.height
-
-        // Create a bitmap to draw on
-        val dest = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(dest)
-        val paint = Paint()
-
-        // Create a ColorMatrix that converts to Grayscale AND increases Contrast
-        // The standard grayscale matrix:
-        // [ 0.33  0.59  0.11  0  0 ]
-        // To make it "Binarized" (Threshold), we multiply these by a large factor (contrast)
-        // and subtract a large offset (brightness) to push grays to 0 or 255.
-        // Formula: Pixel = (Color * Contrast) + Offset
-        val contrast = 2.0f // Scale factor > 1 increases contrast
-        val offset = -100.0f // Shift darks to black
-
-        val colorMatrix = ColorMatrix(floatArrayOf(
-            contrast, 0f, 0f, 0f, offset,  // Red
-            0f, contrast, 0f, 0f, offset,  // Green
-            0f, 0f, contrast, 0f, offset,  // Blue
-            0f, 0f, 0f, 1f, 0f             // Alpha
-        ))
-
-        // Apply the filter (Grayscale is implicit if we use R=G=B inputs,
-        // but explicit Grayscale + High Contrast usually works best)
-        val grayscaleMatrix = ColorMatrix()
-        grayscaleMatrix.setSaturation(0f) // First turn to gray
-
-        // Combine: Gray -> Contrast
-        grayscaleMatrix.postConcat(colorMatrix)
-
-        paint.colorFilter = ColorMatrixColorFilter(grayscaleMatrix)
-        canvas.drawBitmap(src, 0f, 0f, paint)
-
-        return dest
-    }
     fun stop() {
         try {
             textRecognizer.close()
