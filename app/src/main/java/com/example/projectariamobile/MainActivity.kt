@@ -26,6 +26,7 @@ import org.vosk.android.RecognitionListener
 import org.vosk.android.SpeechService
 import org.vosk.android.StorageService
 import java.util.Locale
+import org.opencv.android.OpenCVLoader
 
 class MainActivity : AppCompatActivity(), RecognitionListener {
     private lateinit var startButton: Button
@@ -60,6 +61,11 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContentView(R.layout.activity_main)
+        if (OpenCVLoader.initLocal()) {
+            Log.i("OpenCV", "OpenCV loaded successfully")
+        } else {
+            Log.e("OpenCV", "OpenCV initialization failed")
+        }
 
         setupUI()
         setupTTS()
@@ -394,6 +400,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
                     is NavigationEvent.StopNavigation -> {
                         // stop application
                         Log.d("APP", "STOPPING APPLICATION\n")
+                        tts.speak("Destination found!", TextToSpeech.QUEUE_FLUSH, null, null)
                         handleStop()
                     }
                 }
