@@ -24,11 +24,12 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.onEmpty
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicBoolean
 
 
-data class detection(
+data class Detection(
     var label : String = "",
     var text : String = "",
     var confidence : Float = 0.0f,
@@ -61,13 +62,14 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     private val _messages = MutableStateFlow("")
     val messages: StateFlow<String> = _messages
 
-    private val _ocrResults = MutableStateFlow<String?>(null)
-    val ocrResults: StateFlow<String?> = _ocrResults.asStateFlow()
+//    private val _ocrResults = MutableStateFlow<String?>(null)
+//    val ocrResults: StateFlow<String?> = _ocrResults.asStateFlow()
 
     // Frame statistics
     private val _frameStats = MutableStateFlow("")
     val frameStats: StateFlow<String> = _frameStats.asStateFlow()
 
+    // Debugging variables
     private var frameCount = 0
     private var droppedFrames = 0
     private var lastFrameTime = 0L
@@ -104,8 +106,8 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         "stairs",
     )
 
-    var detections = mutableListOf<detection>()
-    var lastResult = detection()
+    var detections = mutableListOf<Detection>()
+    var lastDetection = Detection()
     var lastInstruction : String = ""
     var lastInstructionTime : Long = 0L
     var matchCounter = 0
@@ -194,11 +196,6 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                     }
                     Log.i("OnBinaryMessage", "------------------------")
                 }
-            }
-            private suspend fun processFrame() {
-                // simulate processing with sleeping
-                Thread.sleep(150)
-
             }
 
             override fun onOpen() {
@@ -379,7 +376,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                 var bbox= yoloDetection.boundingBox
 
                 // create detection object to store global detection (yolo + ocr)
-                val detection = detection()
+                val detection = Detection()
                 detection.label = label
                 detection.confidence = confidence
                 detection.bbox = bbox
@@ -397,6 +394,19 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                         bbox.right.toInt(),
                         bbox.bottom.toInt()
                     )
+                    // try to read text only when enough confidence in yolo detection
+                    if (confidence < 0.5 && isSignPOossibleTarget(label)){ // low confidence and possible sign of interest
+                        Log.d("processFrame()", "low confidence frame, checking distortion")
+                        // check if on the side and distorted
+                        if (DistortionChecker.isSignDistorted(bitmap, cropRect)){
+                            // check on which side the sign is
+                            Log.d("processFrame()", "Sign distorted, getting which side is on")
+                            var onWhichSide : String = getSignPosition(bitmap, cropRect)
+                            if (onWhichSide.isNotEmpty())
+                                Log.d("processFrame()", "Sign on $onWhichSide")
+                                _navigationEvents.emit(NavigationEvent.Speak("There is a sign of interest on the $onWhichSide side, get closer to it and face it to get better readings"))
+                        }
+                    }
                     val ocrStart = SystemClock.uptimeMillis()
                     val recognizedText = textRecognizer.recognizeTextInBoundingBox(bitmap, cropRect, label)
                     val ocrTime = SystemClock.uptimeMillis() - ocrStart
@@ -411,6 +421,9 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                         Log.i("OCR", "No text found in $label (${ocrTime}ms)")
                     }
                 }
+                detections.add(detection)
+                // decide navigation
+                Log.i("processFrame()", "Handling the detection result")
                 handleDetection(detection)
             }
 
@@ -441,14 +454,14 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     /**
      * Handle YOLO+OCR results
      */
-    fun handleDetection(detection : detection){
+    private fun handleDetection(detection : Detection){
         if (destination.isEmpty())
             return
 
         val currentTime = System.currentTimeMillis()
         val isSpeaking = (currentTime - lastInstructionTime) < SPEECH_COOLDOWN
         var compareText = false
-        var instruction : String = ""
+        var instruction = ""
         var match = false
 
        // check what sign was found
@@ -488,31 +501,25 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         // if exit follow its direction
         if (compareText) {
             match = FuzzyLogic.isMatch(detection.text, destination)
+            Log.d("FuzzyLogic()", "Fuzz logic result: $match")
         }
 
-        if (match && !isSpeaking && lastInstruction!=instruction){
+        if (match && !isSpeaking && lastInstruction!=instruction) {
+            Log.d("FuzzLogic()", "emitting vocal command")
             lastInstruction = instruction
             lastInstructionTime = currentTime
             viewModelScope.launch {
-                _navigationEvents.emit( NavigationEvent.Speak(instruction))
+                _navigationEvents.emit(NavigationEvent.Speak(instruction))
             }
 
-            if (instruction.contains("found")){
+            if (instruction.contains("found")) {
+                Log.d("FuzzLogic()", "Emitting stop command")
                 viewModelScope.launch {
                     _navigationEvents.emit(NavigationEvent.StopNavigation)
                 }
             }
 
         }
-
-
-
-    }
-
-
-    private fun handleTrafficSign(signText: String) {
-        // Custom logic for traffic signs
-        Log.i("TRAFFIC_SIGN", "Detected sign: $signText")
     }
 
 
@@ -524,9 +531,29 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         Log.d("OCR", "Added OCR target class: $className")
     }
 
-    fun removeOCRTargetClass(className: String) {
-        (ocrTargetClasses as MutableSet).remove(className.lowercase())
-        Log.d("OCR", "Removed OCR target class: $className")
+    /**
+     * Returns if a detected sign is of interest based on the destination
+     */
+    private fun isSignPOossibleTarget(label: String): Boolean{
+        // if the desitnation is the exit and the detected sign is a exit direction
+        // instead when searching for room all the other signs could be of interest
+        return destination=="exit" && (label=="exit_left" || label=="exit_right")
+
+    }
+
+    /**
+     * Gets if the sign is on the left or right of user's POV
+     */
+    private fun getSignPosition(bitmap: Bitmap, bbox: Rect): String{
+        val xcenter = bitmap.width/2
+        val ycenter = bitmap.height/2
+
+        if (bbox.left < xcenter && bbox.right < xcenter)
+            return "right"
+        else if (bbox.left > xcenter && bbox.right > xcenter)
+            return "left"
+
+        return ""
     }
 
     fun connect() {
@@ -596,10 +623,6 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-//    fun setDestination(command : String){
-//        destination = command.lowercase()
-//        Log.d("socketCheck", "Destination set to: ${command.lowercase()}")
-//    }
 
     // Helper function to check if currently connecting
     fun isConnecting(): Boolean {
