@@ -474,73 +474,112 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     /**
      * Handle YOLO+OCR results
      */
-    private fun handleDetection(detection : Detection){
+    private fun handleDetection(detection: Detection) {
         if (destination.isEmpty())
             return
 
         val currentTime = System.currentTimeMillis()
         val isSpeaking = (currentTime - lastInstructionTime) < SPEECH_COOLDOWN
-        var compareText = false
         var instruction = ""
-        var match = false
+        var shouldEmit = false
+        var stopNavigation = false
 
-       // check what sign was found
+        // Evaluate conditions
+        val isExitSearch = destination == "exit"
+        val textMatch = FuzzyLogic.isMatch(detection.text, destination)
+
+        // Check what sign was found
         when (detection.label) {
             "room" -> {
-                instruction = "Room found"
-                match = FuzzyLogic.isMatch(detection.text, destination) && destination!="exit"
+                if (!isExitSearch){
+                    if (textMatch) {
+                        instruction = "Room found"
+                        shouldEmit = true
+                        stopNavigation = true
+                    }
+                    else {
+                        instruction = "This isn't the room we are looking for"
+                        shouldEmit = true
+                    }
+                }
+
             }
 
             "room_direction_left" -> {
-                instruction = "Your destination is on the left"
-                match = FuzzyLogic.isMatch(detection.text, destination) && destination!="exit"
+                if (!isExitSearch) {
+                    if (textMatch) {
+                        instruction = "Your destination is on the left"
+                        shouldEmit = true
+                    } else if (detection.text.isNotEmpty()) {
+                        // If it read text but it's not a match, tell the user it's not here
+                        instruction = "This sign isn't useful, the destination is not on the left"
+                        shouldEmit = true
+                    }
+                }
             }
 
             "room_direction_right" -> {
-                instruction = "your destination is on the right"
-                match = FuzzyLogic.isMatch(detection.text, destination) && destination!="exit"
+                if (!isExitSearch) {
+                    if (textMatch) {
+                        instruction = "Your destination is on the right"
+                        shouldEmit = true
+                    } else if (detection.text.isNotEmpty()) {
+                        // If it read text but it's not a match, tell the user it's not here
+                        instruction = "This sign isn't useful, the destination is not on the right"
+                        shouldEmit = true
+                    }
+                }
             }
 
             "exit_left" -> {
-                instruction = "The nearest exit is on the left"
-                match = destination == "exit"
+                if (isExitSearch) {
+                    instruction = "The nearest exit is on the left"
+                    shouldEmit = true
+                }
             }
 
             "exit_right" -> {
-                instruction = "The nearest exit is on the right"
-                match = destination == "exit"
+                if (isExitSearch) {
+                    instruction = "The nearest exit is on the right"
+                    shouldEmit = true
+                }
             }
             // stairs
             else -> {
-                instruction = "The destination is on the next floor above you, find the closest stairs"
-                match = FuzzyLogic.isMatch(detection.text, destination) && destination!="exit"
+                if (!isExitSearch) {
+                    if (textMatch){
+                        instruction = "The destination is on the next floor above you, find the closest stairs"
+                        shouldEmit = true
+                    }
+                    else if (detection.text.isNotEmpty()) {
+                        instruction = "The room we are looking for isn't upstairs"
+                        shouldEmit = true
+                    }
+                }
             }
         }
-        
-        // if room, dir right, dir left -> check text
-        // if exit follow its direction
-        Log.d("FuzzyLogic()", "Fuzz logic result: $match")
-        Log.d("handleDetection()", "match: $match, isSpeaking: $isSpeaking, lastInstruction: $lastInstruction, instruction: $instruction")
-        if (match && !isSpeaking && lastInstruction!=instruction) {
-            Log.d("FuzzLogic()", "emitting vocal command")
+
+        Log.d("FuzzyLogic()", "Fuzzy logic match: $textMatch")
+        Log.d("handleDetection()", "shouldEmit: $shouldEmit, isSpeaking: $isSpeaking, lastInstruction: $lastInstruction, instruction: $instruction")
+
+        // Emit vocal command if we have an instruction to give (positive or negative)
+        if (shouldEmit && !isSpeaking && lastInstruction != instruction) {
+            Log.d("handleDetection()", "emitting vocal command")
             lastInstruction = instruction
             lastInstructionTime = currentTime
+
             viewModelScope.launch {
                 _navigationEvents.emit(NavigationEvent.Speak(instruction))
-            }
 
-            if (instruction.contains("found")) {
-                Log.d("FuzzLogic()", "Emitting stop command")
-                viewModelScope.launch {
+                // If the room was found, stop navigation
+                if (stopNavigation) {
+                    Log.d("handleDetection()", "Emitting stop command")
                     lastInstruction = ""
                     lastInstructionTime = 0L
                     _navigationEvents.emit(NavigationEvent.StopNavigation)
                 }
             }
-
         }
-
-
     }
 
 
