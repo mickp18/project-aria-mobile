@@ -412,7 +412,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
     private fun handleStop(){
         stopVosk()
         webSocketViewModel.disconnect()
-        tts.speak("Disconnected, stopping...", TextToSpeech.QUEUE_FLUSH, null, null)
+        tts.speak("Disconnected, stopping...", TextToSpeech.QUEUE_ADD, null, null)
         startBackgroundListening()
     }
 
