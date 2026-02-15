@@ -21,6 +21,7 @@ import android.os.Build
 import android.os.SystemClock
 import android.provider.MediaStore
 import androidx.lifecycle.viewModelScope
+import com.google.android.datatransport.runtime.Destination
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
@@ -101,8 +102,8 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     // Classes that should trigger OCR (configure as needed)
     private val ocrTargetClasses = setOf(
         "room",
-        "direction_left",
-        "direction_right",
+        "room_direction_left",
+        "room_direction_right",
         "stairs",
     )
 
@@ -112,6 +113,10 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     var lastInstructionTime : Long = 0L
     var matchCounter = 0
     private val SPEECH_COOLDOWN = 3000L // 3 Seconds
+
+    // Sign on the side handling
+    var lastSideDetectionTimestamp = 0L
+    var SIDE_MOVEMENT_COOLDOWN = 8000L
 
     // Channel for sending one-time events to MainActivity
     private val _navigationEvents = MutableSharedFlow<NavigationEvent>()
@@ -386,32 +391,37 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                     "Detected: $label (${String.format("%.2f", confidence)}) at [${bbox.left.toInt()},${bbox.top.toInt()},${bbox.right.toInt()},${bbox.bottom.toInt()}]"
                 )
 
-                if (shouldRunOCR(label)) {
-                    ocrCount++
-                    val cropRect = Rect(
-                        bbox.left.toInt(),
-                        bbox.top.toInt(),
-                        bbox.right.toInt(),
-                        bbox.bottom.toInt()
-                    )
-                    // try to read text only when enough confidence in yolo detection
-                    if (confidence < 0.5 && isSignPOossibleTarget(label)){ // low confidence and possible sign of interest
-                        Log.d("processFrame()", "low confidence frame, checking distortion")
-                        // check if on the side and distorted
-                        if (DistortionChecker.isSignDistorted(bitmap, cropRect)){
-                            // check on which side the sign is
-                            Log.d("processFrame()", "Sign distorted, getting which side is on")
-                            var onWhichSide : String = getSignPosition(bitmap, cropRect)
-                            if (onWhichSide.isNotEmpty())
-                                Log.d("processFrame()", "Sign on $onWhichSide")
-                                _navigationEvents.emit(NavigationEvent.Speak("There is a sign of interest on the $onWhichSide side, get closer to it and face it to get better readings"))
-                        }
+                ocrCount++
+                val cropRect = Rect(
+                    bbox.left.toInt(),
+                    bbox.top.toInt(),
+                    bbox.right.toInt(),
+                    bbox.bottom.toInt()
+                )
+
+                var isDistorted = false
+                if (shouldCHeckDistortion(label, confidence, 0.5f)) { // low confidence and possible sign of interest
+                    Log.d("processFrame()", "low confidence frame, checking distortion")
+                    // check if on the side and distorted
+                    if (DistortionChecker.isSignDistorted(bitmap, cropRect)) {
+                        isDistorted = true
+                        // check on which side the sign is
+                        Log.d("processFrame()", "Sign distorted, getting which side is on")
+                        var onWhichSide: String = getSignPosition(bitmap, cropRect)
+                        lastSideDetectionTimestamp =
+                            SystemClock.uptimeMillis() - lastSideDetectionTimestamp
+
+                        if (onWhichSide.isNotEmpty() && lastSideDetectionTimestamp > SIDE_MOVEMENT_COOLDOWN)
+                            Log.d("processFrame()", "Sign on $onWhichSide")
+                        _navigationEvents.emit(NavigationEvent.Speak("There is a ${label}sign  on the $onWhichSide side, get closer to it and face it to get better readings"))
                     }
+                }
+                if (shouldRunOCR(label) && !isDistorted) {
+                    // try to read text only when enough confidence in yolo detection
                     val ocrStart = SystemClock.uptimeMillis()
                     val recognizedText = textRecognizer.recognizeTextInBoundingBox(bitmap, cropRect, label)
                     val ocrTime = SystemClock.uptimeMillis() - ocrStart
                     totalOcrTime += ocrTime
-
 
                     if (recognizedText != null) {
                         Log.i("OCR", "Recognized in ${ocrTime}ms: [$label] = $recognizedText")
@@ -420,6 +430,9 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                     } else {
                         Log.i("OCR", "No text found in $label (${ocrTime}ms)")
                     }
+                }
+                else {
+                    Log.d("pocessFrame()", "sign was distorted or without text, not reading text")
                 }
                 detections.add(detection)
                 // decide navigation
@@ -450,6 +463,13 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             detectionLabel.contains(target, ignoreCase = true)
         }
     }
+    private fun shouldCHeckDistortion(label: String, confidence : Float, conf_treshold: Float) : Boolean{
+        return confidence < conf_treshold && isSignPoossibleTarget(label)
+    }
+
+    private fun handleLowConfidenceDetection(bitmap: Bitmap, bbox : Rect){
+
+    }
 
     /**
      * Handle YOLO+OCR results
@@ -467,43 +487,40 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
        // check what sign was found
         when (detection.label) {
             "room" -> {
-                compareText = true
                 instruction = "Room found"
+                match = FuzzyLogic.isMatch(detection.text, destination) && destination!="exit"
             }
 
-            "direction_left" -> {
-                compareText = true
+            "room_direction_left" -> {
                 instruction = "Your destination is on the left"
+                match = FuzzyLogic.isMatch(detection.text, destination) && destination!="exit"
             }
 
-            "direction_right" -> {
-                compareText = true
+            "room_direction_right" -> {
                 instruction = "your destination is on the right"
-
+                match = FuzzyLogic.isMatch(detection.text, destination) && destination!="exit"
             }
 
             "exit_left" -> {
                 instruction = "The nearest exit is on the left"
-
+                match = destination == "exit"
             }
 
             "exit_right" -> {
                 instruction = "The nearest exit is on the right"
+                match = destination == "exit"
             }
             // stairs
             else -> {
-                compareText = true
                 instruction = "The destination is on the next floor above you, find the closest stairs"
+                match = FuzzyLogic.isMatch(detection.text, destination) && destination!="exit"
             }
         }
         
         // if room, dir right, dir left -> check text
         // if exit follow its direction
-        if (compareText) {
-            match = FuzzyLogic.isMatch(detection.text, destination)
-            Log.d("FuzzyLogic()", "Fuzz logic result: $match")
-        }
-
+        Log.d("FuzzyLogic()", "Fuzz logic result: $match")
+        Log.d("handleDetection()", "match: $match, isSpeaking: $isSpeaking, lastInstruction: $lastInstruction, instruction: $instruction")
         if (match && !isSpeaking && lastInstruction!=instruction) {
             Log.d("FuzzLogic()", "emitting vocal command")
             lastInstruction = instruction
@@ -515,11 +532,15 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             if (instruction.contains("found")) {
                 Log.d("FuzzLogic()", "Emitting stop command")
                 viewModelScope.launch {
+                    lastInstruction = ""
+                    lastInstructionTime = 0L
                     _navigationEvents.emit(NavigationEvent.StopNavigation)
                 }
             }
 
         }
+
+
     }
 
 
@@ -534,10 +555,17 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     /**
      * Returns if a detected sign is of interest based on the destination
      */
-    private fun isSignPOossibleTarget(label: String): Boolean{
+    private fun isSignPoossibleTarget(label: String): Boolean{
         // if the desitnation is the exit and the detected sign is a exit direction
         // instead when searching for room all the other signs could be of interest
-        return destination=="exit" && (label=="exit_left" || label=="exit_right")
+        val isExitDetected =  label=="exit_left" || label=="exit_right"
+
+        if ( destination=="exit" && !isExitDetected)
+            return false
+        else if (destination != "exit" && isExitDetected)
+            return false
+        return true
+
 
     }
 
@@ -549,9 +577,9 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         val ycenter = bitmap.height/2
 
         if (bbox.left < xcenter && bbox.right < xcenter)
-            return "right"
-        else if (bbox.left > xcenter && bbox.right > xcenter)
             return "left"
+        else if (bbox.left > xcenter && bbox.right > xcenter)
+            return "right"
 
         return ""
     }
