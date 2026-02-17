@@ -395,12 +395,12 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
             webSocketViewModel.navigationEvents.collect { event ->
                 when(event){
                     is NavigationEvent.Speak -> {
-                        tts.speak(event.message, TextToSpeech.QUEUE_FLUSH, null, null)
+                        tts.speak(event.message, TextToSpeech.QUEUE_ADD, null, null)
                     }
                     is NavigationEvent.StopNavigation -> {
                         // stop application
                         Log.d("APP", "STOPPING APPLICATION\n")
-                        tts.speak("Destination found!", TextToSpeech.QUEUE_FLUSH, null, null)
+                        tts.speak("Destination found!", TextToSpeech.QUEUE_ADD, null, null)
                         handleStop()
                     }
                 }
