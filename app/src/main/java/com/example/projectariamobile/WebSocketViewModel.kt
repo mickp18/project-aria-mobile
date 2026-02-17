@@ -5,38 +5,43 @@ import android.app.Application
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Rect
+import android.os.SystemClock
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import org.json.JSONObject
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-import android.content.ContentValues
-import android.os.Build
-import android.os.SystemClock
-import android.provider.MediaStore
 import androidx.lifecycle.viewModelScope
-import com.google.android.datatransport.runtime.Destination
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
-import kotlinx.coroutines.flow.onEmpty
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicBoolean
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Data types
+// ─────────────────────────────────────────────────────────────────────────────
 
 data class Detection(
-    var label : String = "",
-    var text : String = "",
-    var confidence : Float = 0.0f,
-    var bbox : android.graphics.RectF = android.graphics.RectF(),
-    var timeStamp : Long = System.currentTimeMillis()
+    var label     : String          = "",
+    var text      : String          = "",
+    var confidence: Float           = 0f,
+    var bbox      : android.graphics.RectF = android.graphics.RectF(),
+    var timeStamp : Long            = System.currentTimeMillis()
+)
+
+/**
+ * Carries everything needed to speak a command and trigger side-effects.
+ * buildInstruction() returns null when there is nothing to say.
+ */
+data class Instruction(
+    val text      : String,
+    val direction : Direction? = null,  // non-null → start compliance tracking
+    val shouldStop: Boolean    = false  // true → emit StopNavigation after speaking
 )
 
 sealed class NavigationEvent {
@@ -44,864 +49,566 @@ sealed class NavigationEvent {
     object StopNavigation : NavigationEvent()
 }
 
-
 sealed class ConnectionStatus {
     object DISCONNECTED : ConnectionStatus()
-    object CONNECTING : ConnectionStatus()
-    object CONNECTED : ConnectionStatus()
+    object CONNECTING   : ConnectionStatus()
+    object CONNECTED    : ConnectionStatus()
     data class FAILED(val error: String) : ConnectionStatus()
 }
 
-class WebSocketViewModel(application: Application) : AndroidViewModel(application) {
-    private val webSocketClient = WebSocketClient.getInstance()
-    private lateinit var navTracker: NavigationTracker
+// ─────────────────────────────────────────────────────────────────────────────
+// ViewModel
+// ─────────────────────────────────────────────────────────────────────────────
 
+class WebSocketViewModel(application: Application) : AndroidViewModel(application) {
+
+    // ── External clients ────────────────────────────────────────────────────
+    private val webSocketClient = WebSocketClient.getInstance()
+    private lateinit var navTracker: NavigationTracker   // phone-IMU based tracker
+
+    // ── Public state ─────────────────────────────────────────────────────────
     private val _isSocketConnected = MutableStateFlow(false)
     val isSocketConnected: StateFlow<Boolean> = _isSocketConnected.asStateFlow()
 
     private val _connectionStatus = MutableStateFlow<ConnectionStatus>(ConnectionStatus.DISCONNECTED)
     val connectionStatus: StateFlow<ConnectionStatus> = _connectionStatus.asStateFlow()
 
-    private val _messages = MutableStateFlow("")
-    val messages: StateFlow<String> = _messages
+    private val _messages   = MutableStateFlow("")
 
-    // Frame statistics
     private val _frameStats = MutableStateFlow("")
     val frameStats: StateFlow<String> = _frameStats.asStateFlow()
 
-    // Debugging variables
-    private var frameCount = 0
-    private var droppedFrames = 0
-    private var lastFrameTime = 0L
-    private var firstFrameTime = 0L
-    private var totalFrames = 0
-    private var lastStatsTime = SystemClock.uptimeMillis()
-
-    var destination : String = ""
-
-    private val isProcessing = AtomicBoolean(false)
-    private val isStopping = AtomicBoolean(false)
-    val threshold = 0.5f
-    val numThreads = 2
-    val currentDelegate = 0
-    val maxResults = 3
-
-    // YOLO detector
-    val yoloDetector: YoloDetector = YoloDetector(
-        threshold,
-        0.3f,
-        numThreads,
-        maxResults,
-        currentDelegate,
-        application,
-    )
-
-    // OCR text recognizer
-    private val textRecognizer = TextRecognitionProcessor(application)
-
-    // Classes that should trigger OCR (configure as needed)
-    private val ocrTargetClasses = setOf(
-        "room",
-        "room_direction_left",
-        "room_direction_right",
-        "stairs",
-    )
-
-    var detections = mutableListOf<Detection>()
-    var lastDetection = Detection()
-    var lastInstruction : String = ""
-    var lastInstructionTime : Long = 0L
-    var matchCounter = 0
-    private val SPEECH_COOLDOWN = 3000L // 3 Seconds
-    private val OLD_SIGN_COOLDOWN = 5000L // 5 seconds between repeating same sign
-    // Track when last sign was a relevant sign
-    private var lastSignTime = 0L
-
-    // Track when we last gave timeout guidance
-    private var lastTimeoutGuidanceTime = 0L
-
-    // Confidence level (degrades over time)
-    private var navigationConfidence = 1.0f
-
-    // Sign on the side handling
-    var lastSideDetectionTimestamp = 0L
-    var SIDE_MOVEMENT_COOLDOWN = 8000L
-
-    // Channel for sending one-time events to MainActivity
     private val _navigationEvents = MutableSharedFlow<NavigationEvent>()
     val navigationEvents = _navigationEvents.asSharedFlow()
 
+    // ── ML components ────────────────────────────────────────────────────────
+    val yoloDetector = YoloDetector(
+        confidenceThreshold    = 0.5f,
+        iouThreshold = 0.3f,
+        numThreads   = 2,
+        maxResults   = 3,
+        currentDelegate = 0,
+        context      = application
+    )
+    private val textRecognizer = TextRecognitionProcessor(application)
+
+    // ── Navigation state ─────────────────────────────────────────────────────
+    var destination         : String = ""
+    var lastInstruction     : String = ""
+    var lastInstructionTime : Long   = 0L
+    private var isStopping           = AtomicBoolean(false)
+
+    // Timeout / confidence
+    private var lastSignTime            = 0L
+    private var lastTimeoutGuidanceTime = 0L
+    private var navigationConfidence    = 1.0f
+
+    // Side-sign hint rate-limiting
+    private var lastSideDetectionTime = 0L
+
+    // ── Frame stats ──────────────────────────────────────────────────────────
+    private var frameCount     = 0
+    private var droppedFrames  = 0
+    private var lastFrameTime  = 0L
+    private var firstFrameTime = 0L
+    private var totalFrames    = 0
+    private var lastStatsTime  = SystemClock.uptimeMillis()
+    private val isProcessing   = AtomicBoolean(false)
+
+    // ── Constants ────────────────────────────────────────────────────────────
+    private val SPEECH_COOLDOWN    = 3_000L   // min gap between any two spoken commands
+    private val OLD_SIGN_COOLDOWN  = 8_000L   // same instruction may repeat after this
+    private val SIDE_COOLDOWN      = 8_000L   // rate-limit for "sign on your side" hints
+    private val PROXIMITY_MIN_AREA = 0.018f   // bbox must be ≥ 1.8 % of frame area
+    private val DISTORTION_CONF    = 0.65f    // confidence below which distortion is checked
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // init — wire WebSocket listener
+    // ─────────────────────────────────────────────────────────────────────────
     init {
+        navTracker = NavigationTracker(application)
+
         webSocketClient.setListener(object : WebSocketClient.SocketListener {
+
             override fun onMessage(message: String) {
                 _messages.value = "New Message: $message"
-
                 try {
-                    val jsonObject = JSONObject(message)
-                    val type = jsonObject.optString("type", "")
-                    Log.d("socketCheck", "onMessage() type = $type")
-
-                    when (type) {
-                        "STATUS_UPDATE" -> {
-                            val payload = jsonObject.getJSONObject("payload")
-                            val status = payload.optString("status", "unknown")
-                            val reason = payload.optString("reason", "")
-                            Log.d("socketCheck", "Status: $status, reason: $reason")
-                            if (status == "stopped") {
-                                _isSocketConnected.value = false
-                                _connectionStatus.value = ConnectionStatus.DISCONNECTED
-                                _messages.value = "Server stopped: ${payload.optString("reason")}"
-                                webSocketClient.disconnect()
-                                Log.i("socketCheck", "Received stopped signal")
-                            }
+                    val json = JSONObject(message)
+                    if (json.optString("type") == "STATUS_UPDATE") {
+                        val payload = json.getJSONObject("payload")
+                        if (payload.optString("status") == "stopped") {
+                            _isSocketConnected.value  = false
+                            _connectionStatus.value   = ConnectionStatus.DISCONNECTED
+                            webSocketClient.disconnect()
                         }
                     }
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
+                } catch (e: Exception) { e.printStackTrace() }
             }
 
             override fun onBinaryMessage(bytes: ByteArray) {
                 val receiveTime = SystemClock.uptimeMillis()
-                frameCount++
-                totalFrames++
+                frameCount++; totalFrames++
 
-                if (isProcessing.get()) {
-                    droppedFrames++
-                    Log.d("socketCheck", "Dropped frame (still processing previous)")
-                    updateStats()
-                    return
-                }
-
-                // Record first frame time for average FPS calculation
-                if (firstFrameTime == 0L) {
-                    firstFrameTime = receiveTime
-                }
-
-                val frameSize = bytes.size / 1024.0
-                val timeSinceLastFrame = if (lastFrameTime > 0) {
-                    receiveTime - lastFrameTime
-                } else {
-                    0L
-                }
-
-                Log.i("FRAME_TIMING",
-                    "Frame ${totalFrames}: ${String.format("%.1f", frameSize)}KB | " +
-                            "Interval: ${timeSinceLastFrame}ms"
-                )
-
+                if (isProcessing.get()) { droppedFrames++; updateStats(); return }
+                if (firstFrameTime == 0L) firstFrameTime = receiveTime
                 lastFrameTime = receiveTime
+
                 viewModelScope.launch(Dispatchers.Default) {
                     if (isProcessing.compareAndSet(false, true)) {
-                        try {
-                            val frameSize = bytes.size / 1024.0
-                            Log.i("socketCheck", "Processing frame ${frameCount}: ${String.format("%.1f", frameSize)}KB")
-
-                            var start = SystemClock.uptimeMillis()
-                            processFrame(bytes)
-                            var end = SystemClock.uptimeMillis()
-                            Log.i("socketCheck", "Frame processed in ${end - start} ms")
-                            updateStats()
-                        } catch (e: Throwable) {
-                            Log.e("socketCheck", "Error processing frame: ${e.localizedMessage}", e)
-                        } finally {
-                            isProcessing.set(false)
-                        }
+                        try   { processFrame(bytes) }
+                        catch (e: Throwable) { Log.e("Frame", e.localizedMessage ?: "", e) }
+                        finally { isProcessing.set(false); updateStats() }
                     }
-                    Log.i("OnBinaryMessage", "------------------------")
                 }
             }
 
             override fun onOpen() {
-                Log.i("socketCheck", "✓ Connection opened")
-                _messages.value = "Socket Opened"
                 _isSocketConnected.value = true
-                _connectionStatus.value = ConnectionStatus.CONNECTED  // NEW: Update status
-
-                // Reset counters
-                frameCount = 0
-                droppedFrames=0
-                totalFrames = 0
-                lastFrameTime = 0L
-                firstFrameTime = 0L
+                _connectionStatus.value  = ConnectionStatus.CONNECTED
+                frameCount = 0; droppedFrames = 0; totalFrames = 0
+                lastFrameTime = 0L; firstFrameTime = 0L
                 lastStatsTime = SystemClock.uptimeMillis()
             }
 
             override fun onError(error: String) {
                 _isSocketConnected.value = false
-                _connectionStatus.value = ConnectionStatus.FAILED(error)  // NEW: Update status with error
-                _messages.value = "Connection Failed: $error"
-                Log.e("socketCheck", "✗ Error: $error")
+                _connectionStatus.value  = ConnectionStatus.FAILED(error)
             }
         })
-        navTracker = NavigationTracker(application)
     }
 
-    @SuppressLint("DefaultLocale")
-    private fun updateStats() {
-        val currentTime = SystemClock.uptimeMillis()
-        val elapsedSeconds = (currentTime - lastStatsTime) / 1000.0
-
-        // Update stats every 5 seconds
-        if (elapsedSeconds >= 5.0) {
-            val fps = frameCount / elapsedSeconds
-            val dropRate = (droppedFrames.toFloat() / frameCount) * 100
-            val totalElapsed = (currentTime - firstFrameTime) / 1000.0
-            val avgFps = if (totalElapsed > 0) totalFrames / totalElapsed else 0.0
-
-            _frameStats.value = String.format(
-                "FPS: %.1f | Received: %d | Dropped: %d (%.1f%%)",
-                fps, frameCount, droppedFrames, dropRate,
-                "Current FPS: %.1f | Avg FPS: %.1f | Total: %d frames",
-                fps, avgFps, totalFrames
-            )
-
-            Log.i("STATS", _frameStats.value)
-            Log.i("STATS", "--------------------------------------------\n")
-
-            // Reset interval counter
-            frameCount = 0
-            droppedFrames = 0
-            lastStatsTime = currentTime
-        }
-    }
+    // =========================================================================
+    //  FRAME PIPELINE
+    // =========================================================================
 
     /**
-     * Process incoming video frame: run YOLO detection and OCR if needed
+     * Top-level orchestrator. Steps are numbered to match the design doc.
      */
-//    private suspend fun processFrame(bytes: ByteArray) {
-//        // Decode bitmap
-//        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-//
-//        if (bitmap == null) {
-//            Log.e("socketCheck", "Failed to decode bitmap")
-//            return
-//        }
-//        var count = 0
-//        try {
-////            val save_orig = saveBitmapToGallery(
-////                application,
-////                bitmap,
-////                fileName = "ORIGINAL_${count}_${System.currentTimeMillis()}.jpg",
-////                folderName = "YOLO_DETECTIONS"
-////            )
-////            if (save_orig) {
-////                Log.i("TextRecognizer", "saved frame number: $count ")
-////            } else {
-////                Log.e("TextRecognizer", "Failed to save cropped image")
-////            }
-////            count = count +1
-//            // Run YOLO detection
-//            var startTime = SystemClock.uptimeMillis()
-//            val results = yoloDetector.detect(bitmap, 0)
-//            val endTime = SystemClock.uptimeMillis()
-//
-//            val inferanceTime = endTime - startTime
-//            Log.i(
-//                "YOLO",
-//                "Found in $inferanceTime ms"
-//            )
-//
-//            if (results.detections.isEmpty()) {
-//                Log.i("YOLO", "No detections on frame; $count")
-//                return
-//            }
-//            count = count + 1
-//
-//            // Process each detection
-//            for (detection in results.detections) {
-//                val label = detection.category.label.lowercase()
-//                val bbox = detection.boundingBox
-//
-//
-//                Log.i(
-//                    "YOLO",
-//                    "Found $label at ${bbox} (confidence: ${detection.category.confidence})"
-//                )
-//
-//                val saved = saveBitmapToGallery(
-//                    application,
-//                    bitmap,
-//                    fileName = "ORIGINAL_${label}_${System.currentTimeMillis()}.jpg",
-//                    folderName = "YOLO_DETECTIONS"
-//                )
-////                if (saved) {
-////                    Log.i("TextRecognizer", "Cropped image saved for class: $label")
-////                } else {
-////                    Log.e("TextRecognizer", "Failed to save cropped image")
-////                }
-//
-//                // Check if this detection should trigger OCR
-//                if (shouldRunOCR(label)) {
-//                    Log.i("OCR", "Running OCR on detected $label")
-//
-//                    // Convert RectF to Rect for cropping
-//                    val cropRect = Rect(
-//                        bbox.left.toInt(),
-//                        bbox.top.toInt(),
-//                        bbox.right.toInt(),
-//                        bbox.bottom.toInt()
-//                    )
-//                    startTime = SystemClock.uptimeMillis()
-//                    // Run OCR on the bounding box
-//                    val recognizedText = textRecognizer.recognizeTextInBoundingBox(
-//                        bitmap,
-//                        cropRect,
-//                        label
-//                    )
-//                    val ocrTime = SystemClock.uptimeMillis() - startTime
-//                    Log.i("tOCR", "OCR executed in $ocrTime")
-//                    if (recognizedText != null) {
-//                        Log.i("OCR", "Recognized text in $label: $recognizedText")
-//
-//                        // Update UI with OCR result
-//                        _ocrResults.value = "[$label]: $recognizedText"
-//
-//                        // Optional: Save results or trigger other actions
-////                        handleOCRResult(label, recognizedText, bbox)
-//                    } else {
-//                        Log.i("OCR", "No text found in $label bounding box")
-//                    }
-//                }
-//            }
-//        } finally {
-//            // Clean up bitmap to prevent memory leaks
-//            bitmap.recycle()
-//        }
-//    }
     private suspend fun processFrame(bytes: ByteArray) {
-        val decodeStart = SystemClock.uptimeMillis()
+        // 1. Decode
+        val t0     = SystemClock.uptimeMillis()
         val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return
-        val decodeTime = SystemClock.uptimeMillis() - decodeStart
 
         try {
-            Log.d("TIMING", "Decode: ${decodeTime}ms")
-
+            // 2. YOLO
             val yoloStart = SystemClock.uptimeMillis()
-            val results = yoloDetector.detect(bitmap, 0)
-            val yoloTime = SystemClock.uptimeMillis() - yoloStart
-            Log.i(
-                "YOLO",
-                "Detection completed in ${yoloTime}ms, found ${results.detections.size} objects"
-            )
+            val results   = yoloDetector.detect(bitmap, 0)
+            Log.i("YOLO", "${results.detections.size} detections in ${SystemClock.uptimeMillis()-yoloStart}ms")
 
-            for (yoloDetection in results.detections) {
-                if (navTracker.shouldProcessDetection(yoloDetection.category.label.lowercase())) {
-                    // Only process if user has moved or it's a new sign
-                    processDetection(yoloDetection, bitmap, decodeTime, decodeStart, yoloTime)
-                } else {
-                    Log.d(
-                        "DetectionFilter",
-                        "Skipped detection: ${yoloDetection.category.label} - user hasn't moved"
-                    )
-                }
+            // 3. Nothing found → only timeout check
+            if (results.detections.isEmpty()) {
+                checkForTimeout()
+                return
             }
-        }
-        finally {
+
+            // 4. Qualify each detection
+            var pendingHint: String? = null
+            val qualified = qualifyDetections(results.detections, bitmap) { hint ->
+                if (pendingHint == null) pendingHint = hint   // keep first/best hint
+            }
+
+            // 5. Nothing survived qualification
+            if (qualified.isEmpty()) {
+                pendingHint?.let { emitIfAllowed(Instruction(it)) }
+                checkForTimeout()
+                return
+            }
+
+            // 6. Pick best among qualified
+            val best = pickBest(qualified) ?: run { checkForTimeout(); return }
+
+            // 7. Movement gate — same sign, user hasn't moved?
+            if (!navTracker.shouldProcessDetection(best.label)) {
+                Log.d("Pipeline", "Movement gate blocked ${best.label}")
+                checkForTimeout()
+                return
+            }
+
+            // 8. Build instruction (pure, no side-effects)
+            val instruction = buildInstruction(best) ?: run { checkForTimeout(); return }
+
+            // 9. Speech gate + emit
+            emitIfAllowed(instruction)
+
+            // Keep track of last useful sign time (for timeout guidance)
+            if (isSignPossibleTarget(best.label)) {
+                lastSignTime        = SystemClock.uptimeMillis()
+                navigationConfidence = 1.0f
+            }
+
+        } finally {
             bitmap.recycle()
+            // 10. Timeout — exactly once per frame
+            checkForTimeout()
+            Log.d("Timing", "Frame in ${SystemClock.uptimeMillis()-t0}ms")
         }
     }
 
-    private suspend fun processDetection(yoloDetection : ObjectDetection, bitmap : Bitmap, decodeTime : Long, decodeStart: Long, yoloTime : Long){
-        var totalOcrTime = 0L
-        var ocrCount = 0
-        val label = yoloDetection.category.label.lowercase()
-        val confidence = yoloDetection.category.confidence
-        val bbox= yoloDetection.boundingBox
+    // ─────────────────────────────────────────────────────────────────────────
+    // Step 4  qualifyDetections
+    //
+    // Filters raw YOLO results down to detections that are:
+    //   a) a relevant sign type for the current destination
+    //   b) big enough on screen (user is close enough)
+    //   c) not distorted / side-angled
+    //   d) have readable text (or are an exit sign that needs none)
+    //
+    // Every rejection fires onDisqualified(hint) so the caller can collect a
+    // single "get closer" message without emitting it directly from here.
+    // ─────────────────────────────────────────────────────────────────────────
 
-        // create detection object to store global detection (yolo + ocr)
-        val detection = Detection()
-        detection.label = label
-        detection.confidence = confidence
-        detection.bbox = bbox
+    private suspend fun qualifyDetections(
+        raw: List<ObjectDetection>,
+        bitmap: Bitmap,
+        onDisqualified: (hint: String) -> Unit
+    ): List<Detection> {
 
-        Log.i(
-            "YOLO",
-            "Detected: $label (${String.format("%.2f", confidence)}) at [${bbox.left.toInt()},${bbox.top.toInt()},${bbox.right.toInt()},${bbox.bottom.toInt()}]"
-        )
+        val frameArea = (bitmap.width * bitmap.height).toFloat()
+        val qualified = mutableListOf<Detection>()
 
-        ocrCount++
-        val cropRect = Rect(
-            bbox.left.toInt(),
-            bbox.top.toInt(),
-            bbox.right.toInt(),
-            bbox.bottom.toInt()
-        )
+        for (r in raw) {
+            val label      = r.category.label.lowercase()
+            val confidence = r.category.confidence
+            val bbox       = r.boundingBox
+            val cropRect   = Rect(bbox.left.toInt(), bbox.top.toInt(),
+                bbox.right.toInt(), bbox.bottom.toInt())
 
-        var isDistorted = false
-        if (shouldCheckDistortion(label, confidence, 0.65f)) { // low confidence and possible sign of interest
-            Log.d("processFrame()", "low confidence frame, checking distortion")
-            // check if on the side and distorted
-            if (DistortionChecker.isSignDistorted(bitmap, cropRect)) {
-                isDistorted = true
-                // check on which side the sign is
-                Log.d("processFrame()", "Sign distorted, getting which side is on")
-                val onWhichSide: String = getSignPosition(bitmap, cropRect)
-                lastSideDetectionTimestamp =
-                    SystemClock.uptimeMillis() - lastSideDetectionTimestamp
+            // 4a — relevant for current destination?
+            if (!isSignPossibleTarget(label)) continue   // silent — not a user-facing event
 
-                if (onWhichSide.isNotEmpty() && lastSideDetectionTimestamp > SIDE_MOVEMENT_COOLDOWN) {
-                    Log.d("processFrame()", "Sign on $onWhichSide")
-                    val instruction = "There is a potentially helpful sign  on your $onWhichSide, get closer to it and face it to get a more accurate detection"
-                    emitVocalCommand(instruction)
+            // 4b — proximity: is the sign close enough to read?
+            val area = (bbox.width() * bbox.height()) / frameArea
+            if (area < PROXIMITY_MIN_AREA) {
+                Log.d("Qualify", "$label too small (${String.format("%.3f", area)})")
+                onDisqualified("There's a sign ahead but you're too far. Move closer to read it.")
+                continue
+            }
+
+            // 4c — distortion check (only worth paying for when confidence is low)
+            if (confidence < DISTORTION_CONF && DistortionChecker.isSignDistorted(bitmap, cropRect)) {
+                val side = getSignPosition(bitmap, cropRect)
+                val hint = if (side.isNotEmpty())
+                    "There's a sign on your $side. Turn to face it for a better reading."
+                else
+                    "A sign is at an angle. Move closer and face it directly."
+                Log.d("Qualify", "$label distorted, side=$side")
+
+                // Rate-limit the side-hint so it isn't spammed
+                val now = SystemClock.uptimeMillis()
+                if (now - lastSideDetectionTime > SIDE_COOLDOWN) {
+                    lastSideDetectionTime = now
+                    onDisqualified(hint)
                 }
+                continue
             }
-        }
-        if (shouldRunOCR(label) && !isDistorted) {
-            // try to read text only when enough confidence in yolo detection
-            val ocrStart = SystemClock.uptimeMillis()
-            val recognizedText = textRecognizer.recognizeTextInBoundingBox(bitmap, cropRect, label)
-            val ocrTime = SystemClock.uptimeMillis() - ocrStart
-            totalOcrTime += ocrTime
 
-            if (recognizedText != null) {
-                Log.i("OCR", "Recognized in ${ocrTime}ms: [$label] = $recognizedText")
-                // add text to detection
-                detection.text = recognizedText.lowercase()
-            } else {
-                Log.i("OCR", "No text found in $label (${ocrTime}ms)")
+            // 4d — run OCR on text-bearing signs
+            val det = Detection(label = label, confidence = confidence, bbox = bbox)
+            if (requiresText(label)) {
+                val t        = SystemClock.uptimeMillis()
+                val ocrText  = textRecognizer.recognizeTextInBoundingBox(bitmap, cropRect, label)
+                Log.i("OCR", "$label → \"$ocrText\" in ${SystemClock.uptimeMillis()-t}ms")
+                det.text     = ocrText?.lowercase() ?: ""
             }
-        }
-        else {
-            Log.d("pocessFrame()", "sign was distorted or without text, not reading text")
-        }
-        detections.add(detection)
-        // decide navigation
-        Log.i("processFrame()", "Handling the detection result")
-        handleDetection(detection)
+            // Exit signs qualify without text — fall through
 
+            // 4e — text-requiring sign with unreadable result
+            if (requiresText(label) && det.text.isEmpty()) {
+                onDisqualified("I can see a sign but can't read it yet. Move a bit closer.")
+                continue
+            }
 
-        val totalTime = SystemClock.uptimeMillis() - decodeStart
-
-        Log.i(
-            "TIMING",
-            "Total: ${totalTime}ms (decode: ${decodeTime}ms, YOLO: ${yoloTime}ms, OCR: ${totalOcrTime}ms for ${ocrCount} objects)"
-        )
-
-        if (totalTime > 500) {
-            Log.w("PERFORMANCE", "Processing took > 500ms - client falling behind!")
+            qualified.add(det)
         }
 
-        checkForTimeout()
+        return qualified
     }
 
-    /**
-     * Determine if OCR should run for this detection class
-     */
-    private fun shouldRunOCR(detectionLabel: String): Boolean {
-        return ocrTargetClasses.any { target ->
-            detectionLabel.contains(target, ignoreCase = true)
-        }
-    }
-    private fun shouldCheckDistortion(label: String, confidence : Float, conf_treshold: Float) : Boolean{
-        return confidence < conf_treshold && isSignPoossibleTarget(label)
-    }
+    // ─────────────────────────────────────────────────────────────────────────
+    // Step 6  pickBest
+    //
+    // Single winner from qualified list.
+    // Positive match > high YOLO confidence > larger bbox (= closer).
+    // ─────────────────────────────────────────────────────────────────────────
 
-    private fun handleLowConfidenceDetection(bitmap: Bitmap, bbox : Rect){
+    private fun pickBest(qualified: List<Detection>): Detection? =
+        qualified.maxWithOrNull(compareBy(
+            { if (FuzzyLogic.isMatch(it.text, destination)) 1 else 0 },
+            { it.confidence },
+            { it.bbox.width() * it.bbox.height() }
+        ))
 
-    }
+    // ─────────────────────────────────────────────────────────────────────────
+    // Step 8  buildInstruction
+    //
+    // Pure function: Detection → Instruction?
+    // Returns null when the detection has nothing actionable to say.
+    // Sets Instruction.direction so compliance tracking starts automatically.
+    // ─────────────────────────────────────────────────────────────────────────
 
-    /**
-     * Handle YOLO+OCR results
-     */
-    private fun handleDetection(detection: Detection) {
-        if (destination.isEmpty())
-            return
-        if (isStopping.get())
-            return
-
-        var instruction = ""
-        var shouldEmit = false
-        var stopNavigation = false
-
-        // Evaluate conditions
+    private fun buildInstruction(det: Detection): Instruction? {
         val isExitSearch = destination == "exit"
-        val textMatch = FuzzyLogic.isMatch(detection.text, destination)
+        val match        = FuzzyLogic.isMatch(det.text, destination)
 
-        if (isSignPoossibleTarget(detection.label) && detection.text.isNotEmpty()){
-            lastSignTime = SystemClock.uptimeMillis()
-            navigationConfidence = 1.0f
-            Log.d("Navigation", "Sign detected, confidence reset")
+        return when (det.label) {
+
+            "room" -> when {
+                isExitSearch -> null
+                match        -> Instruction(
+                    text      = "You've arrived. $destination is right here.",
+                    shouldStop = true
+                )
+                else         -> Instruction("This isn't $destination. Keep looking.")
+            }
+
+            "room_direction_left" -> when {
+                isExitSearch -> null
+                match        -> Instruction(
+                    text      = "Your destination is on the left.",
+                    direction  = Direction.TURN_LEFT
+                )
+                else         -> Instruction(
+                    text      = "The destination isn't on the left. Keep walking.",
+                    direction  = Direction.STRAIGHT
+                )
+            }
+
+            "room_direction_right" -> when {
+                isExitSearch -> null
+                match        -> Instruction(
+                    text      = "Your destination is on the right.",
+                    direction  = Direction.TURN_RIGHT
+                )
+                else         -> Instruction(
+                    text      = "The destination isn't on the right. Keep walking.",
+                    direction  = Direction.STRAIGHT
+                )
+            }
+
+            "exit_left"  -> if (isExitSearch) Instruction(
+                text      = "The nearest exit is on your left.",
+                direction  = Direction.TURN_LEFT
+            ) else null
+
+            "exit_right" -> if (isExitSearch) Instruction(
+                text      = "The nearest exit is on your right.",
+                direction  = Direction.TURN_RIGHT
+            ) else null
+
+            "stairs" -> when {
+                isExitSearch -> null
+                match        -> Instruction(
+                    text      = "Your destination is on another floor. Find the stairs ahead.",
+                    direction  = Direction.STRAIGHT
+                )
+                else         -> Instruction("The destination isn't up these stairs. Keep looking.")
+            }
+
+            else -> null
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Step 9  emitIfAllowed
+    //
+    // Single owner of all speech-gate logic.
+    // Rules:
+    //   • Block if within SPEECH_COOLDOWN of the last utterance.
+    //   • Block if text is identical to last instruction AND it hasn't been
+    //     long enough (OLD_SIGN_COOLDOWN) to repeat it.
+    //   • Otherwise: record, emit, start compliance if direction is set.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private fun emitIfAllowed(instruction: Instruction) {
+        if (destination.isEmpty() || isStopping.get()) return
+
+        val now       = SystemClock.uptimeMillis()
+        val tooRecent = (now - lastInstructionTime) < SPEECH_COOLDOWN
+        val sameText  = lastInstruction == instruction.text
+        val notOldYet = (now - lastInstructionTime) < OLD_SIGN_COOLDOWN
+
+        if (tooRecent || (sameText && notOldYet)) {
+            Log.d("SpeechGate", "Blocked — tooRecent=$tooRecent same=$sameText notOldYet=$notOldYet")
+            return
         }
 
+        lastInstruction     = instruction.text
+        lastInstructionTime = now
+        Log.d("SpeechGate", "Emitting: \"${instruction.text}\"  dir=${instruction.direction}")
 
-        // Check what sign was found
-        when (detection.label) {
-            "room" -> {
-                if (!isExitSearch && detection.text.isNotEmpty()){
-                    if (textMatch && detection.confidence > 0.75) {
-                        instruction = "Room found"
-                        shouldEmit = true
-                        stopNavigation = true
-                    }
-                    else {
-                        instruction = "This isn't the room we are looking for"
-                        shouldEmit = true
-                    }
-                }
-                else if (!isExitSearch && detection.text.isEmpty()) {
-                    instruction = "Couldn't get text from the sign, get closer please"
-                    shouldEmit = true
-                }
+        viewModelScope.launch {
+            _navigationEvents.emit(NavigationEvent.Speak(instruction.text))
+
+            // Compliance tracking — only for directional instructions
+            instruction.direction?.let { dir ->
+                navTracker.startTrackingCompliance(dir)
+                delay(3_000L)
+                checkUserCompliance()
             }
 
-            "room_direction_left" -> {
-                if (!isExitSearch && detection.text.isNotEmpty()) {
-                    if (textMatch) {
-                        instruction = "Your destination is on the left"
-                        shouldEmit = true
-                    } else  {
-                        // If it read text but it's not a match, tell the user it's not here
-                        instruction = "The destination isn't on your left, keep walking"
-                        shouldEmit = true
-                    }
-                }
-                else if (!isExitSearch && detection.text.isNotEmpty()) {
-                    instruction = "Couldn't get text from the sign, get closer please"
-                    shouldEmit = true
-                }
-            }
-
-            "room_direction_right" -> {
-                if (!isExitSearch && detection.text.isNotEmpty()) {
-                    if (textMatch) {
-                        instruction = "Your destination is on the right"
-                        shouldEmit = true
-                    } else {
-                        // If it read text but it's not a match, tell the user it's not here
-                        instruction = "The destination isn't on the right, keep waling"
-                        shouldEmit = true
-                    }
-                }
-                else if (!isExitSearch && detection.text.isEmpty()) {
-                    instruction = "Couldn't get text from the sign, get closer please"
-                    shouldEmit = true
-                }
-            }
-
-            "exit_left" -> {
-                if (isExitSearch) {
-                    instruction = "The nearest exit is on the left"
-                    shouldEmit = true
-                }
-            }
-
-            "exit_right" -> {
-                if (isExitSearch) {
-                    instruction = "The nearest exit is on the right"
-                    shouldEmit = true
-                }
-            }
-            // stairs
-            else -> {
-                if (!isExitSearch && detection.text.isNotEmpty()) {
-                    if (textMatch){
-                        instruction = "The destination is on the next floor above you, find the closest stairs"
-                        shouldEmit = true
-                    }
-                    else {
-                        instruction = "The room we are looking for isn't upstairs"
-                        shouldEmit = true
-                    }
-                }
-                else if (detection.text.isEmpty() && !isExitSearch) {
-                    instruction = "Couldn't get text from the sign, get closer please"
-                    shouldEmit = true
-                }
-            }
-        }
-
-        Log.d("FuzzyLogic()", "Fuzzy logic match: $textMatch")
-        Log.d("handleDetection()", "shouldEmit: $shouldEmit, lastInstruction: $lastInstruction, instruction: $instruction")
-
-        // Emit vocal command if we have an instruction to give (positive or negative)
-        if (shouldEmit) {
-            emitVocalCommand(instruction)
-            // If the room was found, stop navigation
-            if (stopNavigation) {
-                Log.d("handleDetection()", "Emitting stop command")
-                lastInstruction = ""
+            // Arrival — stop navigation after speaking
+            if (instruction.shouldStop) {
+                isStopping.set(true)
+                lastInstruction     = ""
                 lastInstructionTime = 0L
                 navTracker.resetDetectionHistory()
-                isStopping.set(true)
-                viewModelScope.launch {
-                    _navigationEvents.emit(NavigationEvent.StopNavigation)
-                }
+                _navigationEvents.emit(NavigationEvent.StopNavigation)
             }
         }
     }
 
-    private fun emitVocalCommand(message : String) {
-        var directionToTrack: Direction? = null
+    // ─────────────────────────────────────────────────────────────────────────
+    // Compliance check (called from emitIfAllowed coroutine after 3 s delay)
+    // ─────────────────────────────────────────────────────────────────────────
 
-        Log.d("handleDetection()", "emitting vocal command")
-        val currentTime = System.currentTimeMillis()
-        val isSpeaking = (currentTime - lastInstructionTime) < SPEECH_COOLDOWN
-        val oldCOmmand = (lastInstruction == message) && (currentTime - lastInstructionTime > OLD_SIGN_COOLDOWN)
-
-        Log.d("emitVocalCommand()", "isSpeaking; $isSpeaking, old Sign: $oldCOmmand last instruciton: $lastInstruction, message: $message")
-        // emit a command only when no other command was just spoken, the instruction is different or too old 
-        if (!isSpeaking && ( lastInstruction != message || oldCOmmand)) {
-            lastInstructionTime = currentTime
-            lastInstruction = message
-
-            viewModelScope.launch {
-                _navigationEvents.emit(NavigationEvent.Speak(message))
-
-                if (directionToTrack != null) {
-                    navTracker.startTrackingCompliance(directionToTrack)
-
-                    // Check compliance after 3 seconds
-                    delay(3000L)
-                    checkUserCompliance()
-                }
-            }
-
-        }
-    }
     private suspend fun checkUserCompliance() {
-        val compliance = navTracker.checkCompliance()
+        val c = navTracker.checkCompliance() ?: run { navTracker.stopTrackingCompliance(); return }
 
-        if (compliance != null && compliance.compliant == false && compliance.confidence > 0.7f) {
-            // User went wrong way - provide correction
+        if (c.compliant == false && c.confidence > 0.7f) {
             val correction = when {
-                compliance.expected == Direction.TURN_LEFT && compliance.actual == Direction.TURN_RIGHT ->
+                c.expected == Direction.TURN_LEFT  && c.actual == Direction.TURN_RIGHT ->
                     "You turned right. The destination is on the LEFT. Turn around."
-
-                compliance.expected == Direction.TURN_RIGHT && compliance.actual == Direction.TURN_LEFT ->
+                c.expected == Direction.TURN_RIGHT && c.actual == Direction.TURN_LEFT  ->
                     "You turned left. The destination is on the RIGHT. Turn around."
-
-                compliance.expected == Direction.TURN_LEFT && compliance.actual == Direction.STRAIGHT ->
+                c.expected == Direction.TURN_LEFT  && c.actual == Direction.STRAIGHT   ->
                     "You're going straight. Please turn LEFT."
-
-                compliance.expected == Direction.TURN_RIGHT && compliance.actual == Direction.STRAIGHT ->
+                c.expected == Direction.TURN_RIGHT && c.actual == Direction.STRAIGHT   ->
                     "You're going straight. Please turn RIGHT."
-
-                compliance.expected == Direction.STRAIGHT && compliance.actual != Direction.STRAIGHT ->
+                c.expected == Direction.STRAIGHT   && c.actual != Direction.STRAIGHT   ->
                     "Continue STRAIGHT ahead, don't turn."
-
                 else ->
-                    "You went ${compliance.actual}. Please go ${compliance.expected} instead."
+                    "Please go ${c.expected} instead of ${c.actual}."
             }
-
             _navigationEvents.emit(NavigationEvent.Speak(correction))
         }
 
         navTracker.stopTrackingCompliance()
     }
 
-    /**
-     * Add or remove OCR target classes dynamically
-     */
-    fun addOCRTargetClass(className: String) {
-        (ocrTargetClasses as MutableSet).add(className.lowercase())
-        Log.d("OCR", "Added OCR target class: $className")
+    // =========================================================================
+    //  TIMEOUT GUIDANCE  (unchanged logic, one call per frame)
+    // =========================================================================
+
+    private fun checkForTimeout() {
+        val now = SystemClock.uptimeMillis()
+        if (now - lastTimeoutGuidanceTime < 2_000L) return
+
+        if (lastSignTime == 0L && now > 3_000L) {
+            giveTimeoutGuidance("Looking for signs to $destination. Please move forward slowly.", now)
+            return
+        }
+
+        val gap = now - lastSignTime
+        navigationConfidence = when {
+            gap < 5_000L  -> 1.0f
+            gap < 10_000L -> 0.7f
+            gap < 20_000L -> 0.5f
+            gap < 30_000L -> 0.3f
+            else          -> 0.1f
+        }
+
+        val msg = when (gap) {
+            in 5_000L..10_000L  -> "No new signs. Continue forward and look for signs."
+            in 10_000L..20_000L -> "Still no signs. Keep moving and scan the walls."
+            in 20_000L..30_000L -> "No signs for ${gap/1000}s. Turn slowly to scan the area."
+            else                -> if (gap > 30_000L) "Consider asking for directions to $destination." else null
+        }
+        msg?.let { giveTimeoutGuidance(it, now) }
     }
 
-    /**
-     * Returns if a detected sign is of interest based on the destination
-     */
-    private fun isSignPoossibleTarget(label: String): Boolean{
-        // if the desitnation is the exit and the detected sign is a exit direction
-        // instead when searching for room all the other signs could be of interest
-        val isExitDetected =  label=="exit_left" || label=="exit_right"
-
-        if ( destination=="exit" && !isExitDetected)
-            return false
-        else if (destination != "exit" && isExitDetected)
-            return false
-        return true
-
-
+    private fun giveTimeoutGuidance(message: String, now: Long) {
+        if (message == lastInstruction) return
+        if (now - lastInstructionTime < SPEECH_COOLDOWN) return
+        lastInstruction         = message
+        lastInstructionTime     = now
+        lastTimeoutGuidanceTime = now
+        viewModelScope.launch { _navigationEvents.emit(NavigationEvent.Speak(message)) }
     }
 
-    /**
-     * Gets if the sign is on the left or right of user's POV
-     */
-    private fun getSignPosition(bitmap: Bitmap, bbox: Rect): String{
-        val xcenter = bitmap.width/2
-        bitmap.height/2
+    // =========================================================================
+    //  HELPERS
+    // =========================================================================
 
-        if (bbox.left < xcenter && bbox.right < xcenter)
-            return "left"
-        else if (bbox.left > xcenter && bbox.right > xcenter)
-            return "right"
+    /** Signs that need readable text to be actionable. */
+    private fun requiresText(label: String) =
+        label in setOf("room", "room_direction_left", "room_direction_right", "stairs")
 
-        return ""
+    /** Returns false for signs irrelevant to the current destination. */
+    private fun isSignPossibleTarget(label: String): Boolean {
+        val isExitSign = label == "exit_left" || label == "exit_right"
+        return if (destination == "exit") isExitSign else !isExitSign
     }
+
+    /** "left" | "right" | "" based on bbox centre vs frame centre. */
+    private fun getSignPosition(bitmap: Bitmap, bbox: Rect): String {
+        val cx = bitmap.width / 2
+        return when {
+            bbox.right  < cx -> "left"
+            bbox.left   > cx -> "right"
+            else             -> ""
+        }
+    }
+
+    // =========================================================================
+    //  STATS
+    // =========================================================================
+
+    @SuppressLint("DefaultLocale")
+    private fun updateStats() {
+        val now     = SystemClock.uptimeMillis()
+        val elapsed = (now - lastStatsTime) / 1000.0
+        if (elapsed < 5.0) return
+
+        val fps      = frameCount / elapsed
+        val dropRate = if (frameCount > 0) droppedFrames * 100.0 / frameCount else 0.0
+        _frameStats.value = String.format(
+            "FPS: %.1f | Frames: %d | Dropped: %d (%.1f%%)", fps, frameCount, droppedFrames, dropRate
+        )
+        Log.i("Stats", _frameStats.value)
+        frameCount = 0; droppedFrames = 0; lastStatsTime = now
+    }
+
+    // =========================================================================
+    //  CONNECTION
+    // =========================================================================
 
     fun connect() {
-       // Set status to CONNECTING before attempting connection
         _connectionStatus.value = ConnectionStatus.CONNECTING
-        Log.d("socketCheck", "Attempting to connect...")
-
-        // webSocketClient.setSocketUrl("ws://10.42.0.1:8080")
         webSocketClient.setSocketUrl("ws://192.168.1.98:8080")
         webSocketClient.connect()
-
-
         webSocketClient.sendMessage("start")
-
-        // Note: _isSocketConnected and _connectionStatus will be updated in onOpen() or onError()
-        // Don't set _isSocketConnected to true here - wait for actual connection
     }
 
     fun disconnect() {
-        Log.d("socketCheck", "Disconnecting...")
         webSocketClient.sendMessage("stop")
         webSocketClient.disconnect()
         _isSocketConnected.value = false
-        _connectionStatus.value = ConnectionStatus.DISCONNECTED  // NEW: Update status
-
-        // Print final stats
-        val totalElapsed = (SystemClock.uptimeMillis() - firstFrameTime) / 1000.0
-        val avgFps = if (totalElapsed > 0) totalFrames / totalElapsed else 0.0
-        Log.i("FINAL_STATS", "Session ended: ${totalFrames} frames in ${String.format("%.1f", totalElapsed)}s (avg ${String.format("%.1f", avgFps)} FPS)")
+        _connectionStatus.value  = ConnectionStatus.DISCONNECTED
     }
 
-    private fun saveBitmapToFile(bitmap: Bitmap) {
-        val context = getApplication<Application>().applicationContext
-        val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
-        val fileName = "FRAME_$timeStamp.jpg"
-
-        val contentResolver = context.contentResolver
-        val contentValues = ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
-            put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                put(MediaStore.MediaColumns.RELATIVE_PATH, "Pictures/TutorialAppFrames")
-            }
-        }
-
-        val imageUri = contentResolver.insert(
-            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-            contentValues
-        )
-
-        if (imageUri == null) {
-            Log.e("socketCheck", "Failed to create new MediaStore record.")
-            return
-        }
-
-        try {
-            contentResolver.openOutputStream(imageUri).use { out ->
-                if (out == null) {
-                    Log.e("socketCheck", "Failed to open output stream for $imageUri")
-                    return@use
-                }
-                bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
-                Log.i("socketCheck", "Image saved successfully to gallery: $imageUri")
-            }
-        } catch (e: Exception) {
-            Log.e("socketCheck", "Error saving image to MediaStore", e)
-        }
+    fun setDestination(dest: String) {
+        destination         = dest
+        lastInstruction     = ""
+        lastInstructionTime = 0L
+        lastSignTime        = 0L
+        isStopping.set(false)   // ← bug-fix: reset so navigation can start again
+        navTracker.resetDetectionHistory()
     }
-
-
-    // Helper function to check if currently connecting
-    fun isConnecting(): Boolean {
-        return _connectionStatus.value is ConnectionStatus.CONNECTING
-    }
-
-    // Helper function to get error message if failed
-    fun getConnectionError(): String? {
-        return when (val status = _connectionStatus.value) {
-            is ConnectionStatus.FAILED -> status.error
-            else -> null
-        }
-    }
-
-
-    class WebSocketViewModelFactory(private val application: Application) : ViewModelProvider.Factory {
-        override fun <T : ViewModel> create(modelClass: Class<T>): T {
-            if (modelClass.isAssignableFrom(WebSocketViewModel::class.java)) {
-                @Suppress("UNCHECKED_CAST")
-                return WebSocketViewModel(application) as T
-            }
-            throw IllegalArgumentException("Unknown ViewModel class")
-        }
-    }
-
-    private fun checkForTimeout() {
-        val currentTime = SystemClock.uptimeMillis()
-
-        // Only check every 2 seconds to avoid spam
-        if (currentTime - lastTimeoutGuidanceTime < 2000L) {
-            return
-        }
-
-        // First time running? Give initial guidance
-        if (lastSignTime == 0L && currentTime > 3000L) {
-            giveTimeoutGuidance("Looking for signs to $destination. Please move forward slowly.", currentTime)
-            return
-        }
-
-        val timeSinceLastSign = currentTime - lastSignTime
-
-        // Calculate degrading confidence
-        navigationConfidence = when {
-            timeSinceLastSign < 5000L -> 1.0f    // 0-5s: Full confidence
-            timeSinceLastSign < 10000L -> 0.7f   // 5-10s: Good confidence
-            timeSinceLastSign < 20000L -> 0.5f   // 10-20s: Medium confidence
-            timeSinceLastSign < 30000L -> 0.3f   // 20-30s: Low confidence
-            else -> 0.1f                          // 30s+: Critical
-        }
-
-        // Provide guidance based on time elapsed
-        when {
-            // 5-10 seconds: Gentle reminder
-            timeSinceLastSign in 5000L..10000L -> {
-                giveTimeoutGuidance("No new signs detected. Continue forward and look for signs.", currentTime)
-            }
-
-            // 10-20 seconds: More directive
-            timeSinceLastSign in 10000L..20000L -> {
-                giveTimeoutGuidance("Still no signs. Keep moving and scan the walls for directional signs.", currentTime)
-            }
-
-            // 20-30 seconds: Suggest exploration
-            timeSinceLastSign in 20000L..30000L -> {
-                giveTimeoutGuidance("No signs for ${timeSinceLastSign/1000} seconds. Turn slowly to scan the area.", currentTime)
-            }
-
-            // 30+ seconds: Critical - suggest help
-            timeSinceLastSign > 30000L -> {
-                giveTimeoutGuidance("Limited navigation guidance. Consider asking for directions to $destination.", currentTime)
-            }
-        }
-    }
-
-    private fun giveTimeoutGuidance(message: String, currentTime: Long) {
-        // Don't repeat the same message
-        if (message == lastInstruction) {
-            return
-        }
-
-        // Respect speech cooldown
-        if (currentTime - lastInstructionTime < SPEECH_COOLDOWN) {
-            return
-        }
-
-        Log.d("TimeoutGuidance", "Confidence: $navigationConfidence, Message: $message")
-
-        // Update state
-        lastInstruction = message
-        lastInstructionTime = currentTime
-        lastTimeoutGuidanceTime = currentTime
-
-        // Emit the guidance
-        viewModelScope.launch {
-            _navigationEvents.emit(NavigationEvent.Speak(message))
-        }
-    }
-
 
     override fun onCleared() {
         super.onCleared()
         disconnect()
         navTracker.stopSensors()
         _isSocketConnected.value = false
-        _connectionStatus.value = ConnectionStatus.DISCONNECTED  // NEW: Update status
-        destination = ""
+        _connectionStatus.value  = ConnectionStatus.DISCONNECTED
+    }
+
+    class WebSocketViewModelFactory(private val application: Application) :
+        ViewModelProvider.Factory {
+        override fun <T : ViewModel> create(modelClass: Class<T>): T {
+            if (modelClass.isAssignableFrom(WebSocketViewModel::class.java))
+                @Suppress("UNCHECKED_CAST") return WebSocketViewModel(application) as T
+            throw IllegalArgumentException("Unknown ViewModel class")
+        }
     }
 }
