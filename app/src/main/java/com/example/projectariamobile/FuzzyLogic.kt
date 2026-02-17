@@ -3,10 +3,6 @@ package com.example.projectariamobile
 import kotlin.math.min
 
 object FuzzyLogic {
-    /**
-     * Map of common OCR visual confusions.
-     * These pairs will have a very low "cost" in the distance calculation.
-     */
     private val CONFUSIONS = mapOf(
         '0' to listOf('o', 'd', 'q', 'c'),
         'o' to listOf('0', 'd', 'q', 'c'),
@@ -28,41 +24,54 @@ object FuzzyLogic {
     )
 
     /**
-     * Determines if the [target] matches the [ocrText] using robust fuzzy logic.
-     *
-     * @param ocrText The raw text detected by OCR (e.g., "-> RI")
-     * @param target The user's desired destination (e.g., "R1")
-     * @return True if a match is found.
+     * Words that change the meaning of the target room.
+     * If the target is found but preceded by these, the match is rejected.
      */
+    private val EXCLUDED_MODIFIERS = setOf(
+        "studio", "stuudio", "salu", "sss", "study"
+    )
+
     fun isMatch(ocrText: String, target: String): Boolean {
-        // Normalize: Lowercase and remove all non-alphanumeric characters.
-        //    "Room 101 ->" becomes "room101"
-        val cleanOCR = normalize(ocrText)
-        val cleanTarget = normalize(target)
+        // 1. Tokenize into distinct words to respect boundaries
+        val targetTokens = tokenize(target)
+        if (targetTokens.isEmpty()) return false
+        val cleanTargetString = targetTokens.joinToString("")
 
-        if (cleanTarget.isEmpty()) return false
+        val ocrTokens = tokenize(ocrText)
+        val windowSize = targetTokens.size
 
-        // Quick check: Exact substring match (fastest)
-        if (cleanOCR.contains(cleanTarget)) return true
+        // If OCR has fewer words than the target, impossible to match
+        if (ocrTokens.size < windowSize) return false
 
-        // 2. Adaptive Threshold Calculation
-        //    Short targets (R1, 101) need strict matching.
-        //    Long targets (Secretariat) can tolerate more errors.
-        val threshold = calculateThreshold(cleanTarget)
+        val threshold = calculateThreshold(cleanTargetString)
 
-        // 3. Sliding Window Search
-        //    We scan the OCR string looking for the best sub-match.
-        val windowSize = cleanTarget.length
+        // 2. Sliding Window over WORDS (Tokens), not characters
+        for (i in 0..ocrTokens.size - windowSize) {
+            var totalCost = 0.0
+            var isExactMatch = true
 
-        // If OCR is shorter than target, it's impossible to match
-        if (cleanOCR.length < windowSize) return false
+            // Calculate Levenshtein distance token-by-token
+            for (j in 0 until windowSize) {
+                val ocrToken = ocrTokens[i + j]
+                val targetToken = targetTokens[j]
 
-        for (i in 0..cleanOCR.length - windowSize) {
-            val substring = cleanOCR.substring(i, i + windowSize)
-            val score = weightedLevenshtein(substring, cleanTarget)
+                if (ocrToken != targetToken) {
+                    isExactMatch = false
+                    totalCost += weightedLevenshtein(ocrToken, targetToken)
+                }
+            }
 
-            if (score <= threshold) {
-                return true // Match found!
+            // If it falls within our acceptable fuzzy threshold
+            if (isExactMatch || totalCost <= threshold) {
+
+                // 3. Contextual filtering: Ignore if preceded by an excluded modifier
+                val previousWord = if (i > 0) ocrTokens[i - 1] else ""
+
+                if (EXCLUDED_MODIFIERS.contains(previousWord)) {
+                    continue // Skip this match; it's a Studio/Lab, not the base room!
+                }
+
+                return true // Valid Match found!
             }
         }
 
@@ -70,14 +79,18 @@ object FuzzyLogic {
     }
 
     /**
-     * Calculates the edit distance between two strings, applying lower costs
-     * for known visual confusions (e.g. '5' vs 'S').
+     * Tokenizes text by splitting on any non-alphanumeric character.
+     * E.g., "Aale-R1B" -> ["aale", "r1b"]
+     * E.g., "Salu StuUdio R1" -> ["salu", "stuudio", "r1"]
      */
+    private fun tokenize(input: String): List<String> {
+        return input.lowercase().split(Regex("[^a-z0-9]+")).filter { it.isNotEmpty() }
+    }
+
     private fun weightedLevenshtein(lhs: CharSequence, rhs: CharSequence): Double {
         val lhsLen = lhs.length
         val rhsLen = rhs.length
 
-        // We use Double for fractional costs (0.1, 0.2, etc.)
         var cost = DoubleArray(lhsLen + 1) { it.toDouble() }
         var newCost = DoubleArray(lhsLen + 1) { 0.0 }
 
@@ -87,10 +100,6 @@ object FuzzyLogic {
                 val charA = lhs[i - 1]
                 val charB = rhs[j - 1]
 
-                // COST LOGIC:
-                // Match = 0.0
-                // Confusion (1 vs I) = 0.2 (Low Penalty)
-                // Total Mismatch = 1.0 (Full Penalty)
                 val matchCost = if (charA == charB) 0.0 else substitutionCost(charA, charB)
 
                 val costReplace = cost[i - 1] + matchCost
@@ -106,27 +115,16 @@ object FuzzyLogic {
         return cost[lhsLen]
     }
 
-    /**
-     * Returns the cost of swapping char A for char B.
-     */
     private fun substitutionCost(a: Char, b: Char): Double {
         val variants = CONFUSIONS[a] ?: emptyList()
-        // If 'b' is a known visual twin of 'a', cost is low (0.2). Otherwise 1.0.
         return if (variants.contains(b)) 0.2 else 1.0
     }
 
-    /**
-     * Determines how many errors are allowed based on target length.
-     */
     private fun calculateThreshold(target: String): Double {
         return when {
-            target.length <= 3 -> 0.4  // Very strict (e.g. "101" -> "IOI" is ok, but "102" is not)
-            target.length <= 5 -> 1.5  // "Study" -> "5tudy" (approx 0.4 cost) is ok
-            else -> 2.5                // "Laboratory" -> "Laboretory" is ok
+            target.length <= 3 -> 0.4
+            target.length <= 5 -> 1.5
+            else -> 2.5
         }
-    }
-
-    private fun normalize(input: String): String {
-        return input.lowercase().replace(Regex("[^a-z0-9]"), "")
     }
 }
