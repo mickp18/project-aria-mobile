@@ -80,6 +80,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     var destination : String = ""
 
     private val isProcessing = AtomicBoolean(false)
+    private val isStopping = AtomicBoolean(false)
     val threshold = 0.5f
     val numThreads = 2
     val currentDelegate = 0
@@ -506,6 +507,8 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     private fun handleDetection(detection: Detection) {
         if (destination.isEmpty())
             return
+        if (isStopping.get())
+            return
 
         var instruction = ""
         var shouldEmit = false
@@ -521,10 +524,11 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             Log.d("Navigation", "Sign detected, confidence reset")
         }
 
+
         // Check what sign was found
         when (detection.label) {
             "room" -> {
-                if (!isExitSearch){
+                if (!isExitSearch && detection.text.isNotEmpty()){
                     if (textMatch && detection.confidence > 0.75) {
                         instruction = "Room found"
                         shouldEmit = true
@@ -535,32 +539,43 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                         shouldEmit = true
                     }
                 }
-
+                else if (!isExitSearch && detection.text.isEmpty()) {
+                    instruction = "Couldn't get text from the sign, get closer please"
+                    shouldEmit = true
+                }
             }
 
             "room_direction_left" -> {
-                if (!isExitSearch) {
+                if (!isExitSearch && detection.text.isNotEmpty()) {
                     if (textMatch) {
                         instruction = "Your destination is on the left"
                         shouldEmit = true
-                    } else if (detection.text.isNotEmpty()) {
+                    } else  {
                         // If it read text but it's not a match, tell the user it's not here
-                        instruction = "This sign isn't useful, the destination is not on the left"
+                        instruction = "The destination isn't on your left, keep walking"
                         shouldEmit = true
                     }
+                }
+                else if (!isExitSearch && detection.text.isNotEmpty()) {
+                    instruction = "Couldn't get text from the sign, get closer please"
+                    shouldEmit = true
                 }
             }
 
             "room_direction_right" -> {
-                if (!isExitSearch) {
+                if (!isExitSearch && detection.text.isNotEmpty()) {
                     if (textMatch) {
                         instruction = "Your destination is on the right"
                         shouldEmit = true
-                    } else if (detection.text.isNotEmpty()) {
+                    } else {
                         // If it read text but it's not a match, tell the user it's not here
-                        instruction = "This sign isn't useful, the destination is not on the right"
+                        instruction = "The destination isn't on the right, keep waling"
                         shouldEmit = true
                     }
+                }
+                else if (!isExitSearch && detection.text.isEmpty()) {
+                    instruction = "Couldn't get text from the sign, get closer please"
+                    shouldEmit = true
                 }
             }
 
@@ -579,15 +594,19 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             }
             // stairs
             else -> {
-                if (!isExitSearch) {
+                if (!isExitSearch && detection.text.isNotEmpty()) {
                     if (textMatch){
                         instruction = "The destination is on the next floor above you, find the closest stairs"
                         shouldEmit = true
                     }
-                    else if (detection.text.isNotEmpty()) {
+                    else {
                         instruction = "The room we are looking for isn't upstairs"
                         shouldEmit = true
                     }
+                }
+                else if (detection.text.isEmpty() && !isExitSearch) {
+                    instruction = "Couldn't get text from the sign, get closer please"
+                    shouldEmit = true
                 }
             }
         }
@@ -604,7 +623,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                 lastInstruction = ""
                 lastInstructionTime = 0L
                 navTracker.resetDetectionHistory()
-
+                isStopping.set(true)
                 viewModelScope.launch {
                     _navigationEvents.emit(NavigationEvent.StopNavigation)
                 }

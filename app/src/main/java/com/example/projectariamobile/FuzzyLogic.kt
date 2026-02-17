@@ -28,11 +28,11 @@ object FuzzyLogic {
      * If the target is found but preceded by these, the match is rejected.
      */
     private val EXCLUDED_MODIFIERS = setOf(
-        "studio", "stuudio", "salu", "sss", "study"
+        "studio", "stuudio", "salu", "sss", "study", "stuio", "aule", "sale"
     )
 
     fun isMatch(ocrText: String, target: String): Boolean {
-        // 1. Tokenize into distinct words to respect boundaries
+        // Tokenize into distinct words to respect boundaries
         val targetTokens = tokenize(target)
         if (targetTokens.isEmpty()) return false
         val cleanTargetString = targetTokens.joinToString("")
@@ -45,7 +45,7 @@ object FuzzyLogic {
 
         val threshold = calculateThreshold(cleanTargetString)
 
-        // 2. Sliding Window over WORDS (Tokens), not characters
+        // Sliding Window over WORDS (Tokens), not characters
         for (i in 0..ocrTokens.size - windowSize) {
             var totalCost = 0.0
             var isExactMatch = true

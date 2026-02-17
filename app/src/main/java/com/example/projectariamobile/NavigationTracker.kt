@@ -11,27 +11,68 @@ import kotlin.math.*
 
 /**
  * UNIFIED NAVIGATION TRACKER
- * Combines:
- * 1. Direction compliance (verify user follows instructions)
- * 2. Movement detection (detect if user moved to new position)
- * 3. Position tracking (dead reckoning)
  *
- * Solves: Repeated detections from same sign when user hasn't moved
+ * ┌─────────────────────────────────────────────────────────┐
+ * │  IMU DATA SOURCES                                        │
+ * │                                                          │
+ * │  PHONE sensors (always available):                       │
+ * │    - Accelerometer → step detection, motion energy       │
+ * │    - Magnetometer  → phone compass heading (fallback)    │
+ * │                                                          │
+ * │  GLASSES IMU (feed via injectGlassesImu() when ready):   │
+ * │    - Heading/orientation → replaces phone heading        │
+ * │    - Acceleration → can replace phone steps              │
+ * │                                                          │
+ * │  RIGHT NOW: phone-only mode. Call injectGlassesImu()     │
+ * │  once you stream IMU data from Aria alongside video.     │
+ * └─────────────────────────────────────────────────────────┘
  */
 
 class NavigationTracker(context: Context) : SensorEventListener {
 
+    // ── IMU source selection ─────────────────────────────────────────────────
+    // When glassesHeading is non-null it is used instead of the phone compass.
+    // When glassesAccel is non-null it is used instead of the phone accel.
+    private var glassesHeading: Float? = null   // degrees 0-360, null = use phone
+    private var glassesAccel: FloatArray? = null // [x,y,z] m/s², null = use phone
+
     private val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
     private val accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-    private val gyroscope = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+    private val gyroscope    = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
     private val magnetometer = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
 
-    // Sensor readings
+    // Raw phone sensor readings (always collected as fallback)
     private val accelData = FloatArray(3)
-    private val magData = FloatArray(3)
-    private val gyroData = FloatArray(3)
+    private val magData   = FloatArray(3)
+    private val gyroData  = FloatArray(3)
     private val rotationMatrix = FloatArray(9)
-    private val orientation = FloatArray(3)
+    private val orientation    = FloatArray(3)
+
+    /**
+     * Call this every time you receive an IMU packet from the Aria glasses.
+     * Once called, the tracker uses glasses data for heading (and optionally
+     * acceleration) instead of the phone sensors.
+     *
+     * @param yaw   Glasses yaw in degrees (0-360). This is the heading.
+     * @param accel Optional [x,y,z] linear acceleration from glasses (m/s²).
+     *              Pass null to keep using phone accelerometer for steps.
+     */
+    fun injectGlassesImu(yaw: Float, accel: FloatArray? = null) {
+        glassesHeading = (yaw + 360f) % 360f
+        if (accel != null) {
+            glassesAccel = accel.clone()
+            // Route glasses accel through the same step/motion pipeline
+            processGlassesAccel(accel)
+        }
+        // Always update position heading with the best available source
+        currentPosition.heading = getHeading()
+        if (isTrackingCompliance) {
+            recordHeadingForCompliance()
+        }
+    }
+
+    /** Which heading source is active right now. Useful for debug UI. */
+    fun headingSource(): String = if (glassesHeading != null) "GLASSES" else "PHONE"
 
     // ========================================================================
     // MOVEMENT & POSITION TRACKING
@@ -41,14 +82,28 @@ class NavigationTracker(context: Context) : SensorEventListener {
     private var currentPosition = Position(0f, 0f, 0f)
     private var stepCount = 0
     private var lastStepTime = 0L
+
+    // FIX 2: Proper peak detection state
     private var lastAccelMagnitude = 0f
+    private var accelPeak = 0f
+    private var isRising = false
+
+    // FIX 3: Accelerometer energy window (replaces step-only movement)
+    private val accelWindow = ArrayDeque<Float>(20)
+    private val ACCEL_WINDOW_SIZE = 20
+    private var lastMotionTime = 0L
 
     // Movement thresholds
-    private val STEP_THRESHOLD = 13.0f          // Acceleration threshold for step detection
-    private val MIN_STEP_INTERVAL = 250L        // Minimum time between steps (ms)
-    private val STEP_LENGTH = 0.75f             // Average step length in meters
-    private val MOVEMENT_THRESHOLD = 1.5f       // Meters - minimum movement to consider "moved"
-    private val HEADING_CHANGE_THRESHOLD = 45f  // Degrees - significant heading change
+    // FIX 2: Much lower threshold for head-mounted device
+    private val STEP_THRESHOLD = 10.5f          // Was 13.0 - head-mounted needs lower value
+    private val MIN_STEP_INTERVAL = 250L
+    private val STEP_LENGTH = 0.75f
+    private val MOVEMENT_THRESHOLD = 1.5f
+    private val HEADING_CHANGE_THRESHOLD = 45f
+
+    // FIX 3: Motion energy threshold (variance-based, not step-based)
+    private val MOTION_ENERGY_THRESHOLD = 0.8f  // m/s² std deviation to count as "in motion"
+    private val MOTION_WINDOW_MS = 3000L        // Consider "still moving" for 3s after last motion
 
     // ========================================================================
     // DIRECTION COMPLIANCE TRACKING
@@ -95,16 +150,25 @@ class NavigationTracker(context: Context) : SensorEventListener {
      */
     fun hasMovedSinceLastDetection(signType: String): Boolean {
         val distanceMoved = calculateDistanceFromLastDetection()
-        val headingChanged = abs(normalizeAngle(getCurrentHeading() - lastDetectionPosition.heading))
+        val headingChanged = abs(normalizeAngle(getHeading() - lastDetectionPosition.heading))
+        val accelVariance = getAccelVariance()
+        val recentMotion = hasSignificantMotionRecently()
 
         Log.d("MovementCheck",
-            "Distance: ${String.format("%.2f", distanceMoved)}m, Heading change: ${headingChanged.toInt()}°")
+            "Distance: ${String.format("%.2f", distanceMoved)}m | " +
+                    "Heading Δ: ${headingChanged.toInt()}° | " +
+                    "AccelVariance: ${String.format("%.3f", accelVariance)} | " +
+                    "RecentMotion: $recentMotion | " +
+                    "Steps: $stepCount"
+        )
 
-        // User has moved if:
-        // 1. Moved more than threshold distance, OR
-        // 2. Turned significantly (even if didn't walk far)
+        // User has moved if ANY of these are true:
+        // 1. Dead reckoning distance (step-based)
+        // 2. Significant heading change
+        // 3. Accelerometer variance shows movement (catches non-step motion)
         return distanceMoved >= MOVEMENT_THRESHOLD ||
-                headingChanged >= HEADING_CHANGE_THRESHOLD
+                headingChanged >= HEADING_CHANGE_THRESHOLD ||
+                accelVariance > 1.5f  // High variance = definitely moving
     }
 
     /**
@@ -126,9 +190,9 @@ class NavigationTracker(context: Context) : SensorEventListener {
      * @param signText OCR text from sign (e.g., "R1")
      * @return true if detection should be processed, false if should be ignored
      */
-    fun shouldProcessDetection(signType: String): Boolean {
+    fun shouldProcessDetection(signType: String, signText: String = ""): Boolean {
         val now = SystemClock.uptimeMillis()
-        val detectionKey = signType
+        val detectionKey = "$signType:$signText"
 
         val lastRecord = detectionHistory[detectionKey]
 
@@ -152,10 +216,18 @@ class NavigationTracker(context: Context) : SensorEventListener {
 
         // Check if user has moved since last detection of this sign
         val distanceFromLastDetection = calculateDistance(currentPosition, lastRecord.position)
-        val headingChange = abs(normalizeAngle(currentPosition.heading - lastRecord.position.heading))
+        // FIX 1: Use live heading instead of stale position heading
+        val headingChange = abs(normalizeAngle(getHeading() - lastRecord.position.heading))
+        val accelVariance = getAccelVariance()
 
         val hasMoved = distanceFromLastDetection >= MOVEMENT_THRESHOLD ||
-                headingChange >= HEADING_CHANGE_THRESHOLD
+                headingChange >= HEADING_CHANGE_THRESHOLD ||
+                accelVariance > 1.5f  // High variance = device is moving
+
+        Log.d("DetectionFilter",
+            "$detectionKey | dist=${String.format("%.2f", distanceFromLastDetection)}m | " +
+                    "headingΔ=${headingChange.toInt()}° | variance=${String.format("%.3f", accelVariance)} | moved=$hasMoved"
+        )
 
         if (!hasMoved) {
             // User hasn't moved - check redetection count
@@ -211,7 +283,7 @@ class NavigationTracker(context: Context) : SensorEventListener {
         return MovementState(
             distanceFromLastDetection = distanceMoved,
             totalSteps = stepCount,
-            currentHeading = getCurrentHeading(),
+            currentHeading = getHeading(),
             isMoving = isMoving,
             currentPosition = currentPosition.copy()
         )
@@ -225,7 +297,7 @@ class NavigationTracker(context: Context) : SensorEventListener {
         isTrackingCompliance = true
         expectedDirection = direction
         complianceStartTime = SystemClock.uptimeMillis()
-        complianceInitialHeading = getCurrentHeading()
+        complianceInitialHeading = getHeading()
         complianceHeadingHistory.clear()
         complianceMovementDetected = false
 
@@ -264,9 +336,37 @@ class NavigationTracker(context: Context) : SensorEventListener {
         expectedDirection = null
     }
 
-    // ========================================================================
-    // POSITION CALCULATION
-    // ========================================================================
+    /**
+     * Call this to understand why movement isn't being detected.
+     * Log this every few seconds to see raw sensor values.
+     */
+    fun debugSensorValues(): String {
+        val accel = getAccel()
+        val magnitude = sqrt(accel[0]*accel[0] + accel[1]*accel[1] + accel[2]*accel[2])
+        val netAccel = abs(magnitude - SensorManager.GRAVITY_EARTH)
+
+        return """
+            === Movement Debug ===
+            Heading source:   ${headingSource()}
+            Accel source:     ${if (glassesAccel != null) "GLASSES" else "PHONE"}
+            Accel magnitude:  ${String.format("%.2f", magnitude)} m/s²  (gravity=9.8)
+            Net acceleration: ${String.format("%.2f", netAccel)} m/s²   (>0 when moving)
+            Accel variance:   ${String.format("%.3f", getAccelVariance())}           (>1.5 = moving)
+            Step threshold:   $STEP_THRESHOLD m/s²
+            Steps detected:   $stepCount
+            ----------------------
+            Current heading:  ${String.format("%.1f", getHeading())}°
+            Last det heading: ${String.format("%.1f", lastDetectionPosition.heading)}°
+            Heading delta:    ${String.format("%.1f", abs(normalizeAngle(getHeading() - lastDetectionPosition.heading)))}°
+            Heading threshold:$HEADING_CHANGE_THRESHOLD°
+            ----------------------
+            Distance moved:   ${String.format("%.2f", calculateDistanceFromLastDetection())}m
+            Distance thresh:  ${MOVEMENT_THRESHOLD}m
+            Recent motion:    ${hasSignificantMotionRecently()}
+            Last motion:      ${SystemClock.uptimeMillis() - lastMotionTime}ms ago
+            =====================
+        """.trimIndent()
+    }
 
     private fun calculateDistanceFromLastDetection(): Float {
         return calculateDistance(currentPosition, lastDetectionPosition)
@@ -283,7 +383,7 @@ class NavigationTracker(context: Context) : SensorEventListener {
      * Called when a step is detected
      */
     private fun updatePosition() {
-        val heading = getCurrentHeading()
+        val heading = getHeading()
         val headingRadians = Math.toRadians(heading.toDouble())
 
         // Update position based on heading and step length
@@ -302,11 +402,16 @@ class NavigationTracker(context: Context) : SensorEventListener {
         when (event.sensor.type) {
             Sensor.TYPE_ACCELEROMETER -> {
                 System.arraycopy(event.values, 0, accelData, 0, 3)
-                detectStep(event.values)
-                detectMovementForCompliance(event.values)
+                // Only use phone accel for step/motion if glasses accel not available
+                if (glassesAccel == null) {
+                    detectStep(event.values)
+                    detectMovementForCompliance(event.values)
+                }
             }
             Sensor.TYPE_MAGNETIC_FIELD -> {
                 System.arraycopy(event.values, 0, magData, 0, 3)
+                // Always update heading from best available source
+                currentPosition.heading = getHeading()
                 if (isTrackingCompliance) {
                     recordHeadingForCompliance()
                 }
@@ -317,10 +422,21 @@ class NavigationTracker(context: Context) : SensorEventListener {
         }
     }
 
+    /**
+     * Called from injectGlassesImu() to process glasses accelerometer data
+     * through the same step/motion pipeline as the phone accel.
+     */
+    private fun processGlassesAccel(accel: FloatArray) {
+        detectStep(accel)
+        detectMovementForCompliance(accel)
+    }
+
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
     /**
-     * Step detection algorithm
+     * FIX 2: Proper peak detection step algorithm
+     * Old: fired when magnitude > last (only on rising edge = misses most peaks)
+     * New: detects actual peak (was rising, now falling, above threshold)
      */
     private fun detectStep(accel: FloatArray) {
         val magnitude = sqrt(
@@ -330,18 +446,52 @@ class NavigationTracker(context: Context) : SensorEventListener {
         )
 
         val now = SystemClock.uptimeMillis()
+        val netAccel = abs(magnitude - SensorManager.GRAVITY_EARTH)
 
-        // Detect peak in acceleration (step)
-        if (magnitude > STEP_THRESHOLD &&
-            magnitude > lastAccelMagnitude &&
-            now - lastStepTime > MIN_STEP_INTERVAL) {
+        // FIX 3: Feed energy window for variance-based detection
+        accelWindow.addLast(netAccel)
+        if (accelWindow.size > ACCEL_WINDOW_SIZE) accelWindow.removeFirst()
 
-            stepCount++
-            lastStepTime = now
-            updatePosition()
+        // If there's significant motion energy, record time
+        if (netAccel > MOTION_ENERGY_THRESHOLD) {
+            lastMotionTime = now
         }
 
+        // Peak detection: were rising, now falling, and peak was above threshold
+        val nowRising = magnitude > lastAccelMagnitude
+        if (!nowRising && isRising && accelPeak > STEP_THRESHOLD) {
+            // Peak detected!
+            if (now - lastStepTime > MIN_STEP_INTERVAL) {
+                stepCount++
+                lastStepTime = now
+                updatePosition()
+                Log.d("StepDetection", "Step #$stepCount detected, peak=$accelPeak")
+            }
+        }
+
+        isRising = nowRising
+        if (nowRising) accelPeak = magnitude
         lastAccelMagnitude = magnitude
+    }
+
+    /**
+     * FIX 3: Check if device has had significant motion recently
+     * Uses accelerometer energy variance, not just step count.
+     * Works even when steps aren't cleanly detected (e.g., head-mounted device).
+     */
+    fun hasSignificantMotionRecently(): Boolean {
+        val timeSinceMotion = SystemClock.uptimeMillis() - lastMotionTime
+        return lastMotionTime > 0 && timeSinceMotion < MOTION_WINDOW_MS
+    }
+
+    /**
+     * FIX 3: Get accelerometer variance over recent window
+     * High variance = device is moving
+     */
+    private fun getAccelVariance(): Float {
+        if (accelWindow.size < 5) return 0f
+        val mean = accelWindow.average().toFloat()
+        return accelWindow.map { (it - mean) * (it - mean) }.average().toFloat()
     }
 
     private fun detectMovementForCompliance(accel: FloatArray) {
@@ -363,7 +513,7 @@ class NavigationTracker(context: Context) : SensorEventListener {
     private fun recordHeadingForCompliance() {
         if (!isTrackingCompliance) return
 
-        val heading = getCurrentHeading()
+        val heading = getHeading()
         val timestamp = SystemClock.uptimeMillis()
 
         complianceHeadingHistory.add(HeadingMeasurement(heading, timestamp))
@@ -398,7 +548,7 @@ class NavigationTracker(context: Context) : SensorEventListener {
             )
         }
 
-        val currentHeading = getCurrentHeading()
+        val currentHeading = getHeading()
         val headingChange = normalizeAngle(currentHeading - complianceInitialHeading)
 
         val actualDirection = detectActualDirection(headingChange, complianceMovementDetected)
@@ -468,18 +618,29 @@ class NavigationTracker(context: Context) : SensorEventListener {
     }
 
     // ========================================================================
-    // HELPER FUNCTIONS
+    // HEADING: uses glasses IMU when available, phone compass as fallback
     // ========================================================================
 
-    private fun getCurrentHeading(): Float {
-        if (!SensorManager.getRotationMatrix(rotationMatrix, null, accelData, magData)) {
-            return 0f
-        }
+    /**
+     * Best available heading (degrees, 0-360).
+     * Priority: glasses yaw > phone magnetometer.
+     */
+    private fun getHeading(): Float {
+        glassesHeading?.let { return it }  // glasses data available → use it
 
+        // Fallback: phone compass
+        if (!SensorManager.getRotationMatrix(rotationMatrix, null, accelData, magData)) {
+            return currentPosition.heading  // can't compute, return last known
+        }
         SensorManager.getOrientation(rotationMatrix, orientation)
-        val azimuth = Math.toDegrees(orientation[0].toDouble()).toFloat()
-        return (azimuth + 360f) % 360f
+        return (Math.toDegrees(orientation[0].toDouble()).toFloat() + 360f) % 360f
     }
+
+    /**
+     * Best available acceleration array [x,y,z] in m/s².
+     * Priority: glasses accel > phone accel.
+     */
+    private fun getAccel(): FloatArray = glassesAccel ?: accelData
 
     private fun normalizeAngle(angle: Float): Float {
         var normalized = angle

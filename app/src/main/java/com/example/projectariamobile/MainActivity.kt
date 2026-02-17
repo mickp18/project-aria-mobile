@@ -400,7 +400,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
                     is NavigationEvent.StopNavigation -> {
                         // stop application
                         Log.d("APP", "STOPPING APPLICATION\n")
-                        tts.speak("Destination found!", TextToSpeech.QUEUE_ADD, null, null)
+                        tts.speak("Destination found!", TextToSpeech.QUEUE_FLUSH, null, null)
                         handleStop()
                     }
                 }
