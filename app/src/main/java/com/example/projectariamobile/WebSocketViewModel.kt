@@ -23,6 +23,7 @@ import android.provider.MediaStore
 import androidx.lifecycle.viewModelScope
 import com.google.android.datatransport.runtime.Destination
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.onEmpty
@@ -53,6 +54,7 @@ sealed class ConnectionStatus {
 
 class WebSocketViewModel(application: Application) : AndroidViewModel(application) {
     private val webSocketClient = WebSocketClient.getInstance()
+    private lateinit var navTracker: NavigationTracker
 
     private val _isSocketConnected = MutableStateFlow(false)
     val isSocketConnected: StateFlow<Boolean> = _isSocketConnected.asStateFlow()
@@ -231,6 +233,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                 Log.e("socketCheck", "✗ Error: $error")
             }
         })
+        navTracker = NavigationTracker(application)
     }
 
     @SuppressLint("DefaultLocale")
@@ -376,94 +379,109 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             val yoloStart = SystemClock.uptimeMillis()
             val results = yoloDetector.detect(bitmap, 0)
             val yoloTime = SystemClock.uptimeMillis() - yoloStart
-            Log.i("YOLO", "Detection completed in ${yoloTime}ms, found ${results.detections.size} objects")
-
-            var totalOcrTime = 0L
-            var ocrCount = 0
-
-            for (yoloDetection in results.detections) {
-                val label = yoloDetection.category.label.lowercase()
-                val confidence = yoloDetection.category.confidence
-                val bbox= yoloDetection.boundingBox
-
-                // create detection object to store global detection (yolo + ocr)
-                val detection = Detection()
-                detection.label = label
-                detection.confidence = confidence
-                detection.bbox = bbox
-
-                Log.i(
-                    "YOLO",
-                    "Detected: $label (${String.format("%.2f", confidence)}) at [${bbox.left.toInt()},${bbox.top.toInt()},${bbox.right.toInt()},${bbox.bottom.toInt()}]"
-                )
-
-                ocrCount++
-                val cropRect = Rect(
-                    bbox.left.toInt(),
-                    bbox.top.toInt(),
-                    bbox.right.toInt(),
-                    bbox.bottom.toInt()
-                )
-
-                var isDistorted = false
-                if (shouldCHeckDistortion(label, confidence, 0.65f)) { // low confidence and possible sign of interest
-                    Log.d("processFrame()", "low confidence frame, checking distortion")
-                    // check if on the side and distorted
-                    if (DistortionChecker.isSignDistorted(bitmap, cropRect)) {
-                        isDistorted = true
-                        // check on which side the sign is
-                        Log.d("processFrame()", "Sign distorted, getting which side is on")
-                        val onWhichSide: String = getSignPosition(bitmap, cropRect)
-                        lastSideDetectionTimestamp =
-                            SystemClock.uptimeMillis() - lastSideDetectionTimestamp
-
-                        if (onWhichSide.isNotEmpty() && lastSideDetectionTimestamp > SIDE_MOVEMENT_COOLDOWN) {
-                            Log.d("processFrame()", "Sign on $onWhichSide")
-                            val instruction = "There is a potentially helpful sign  on your $onWhichSide, get closer to it and face it to get a more accurate detection"
-                            emitVocalCommand(instruction)
-                        }
-                    }
-                }
-                if (shouldRunOCR(label) && !isDistorted) {
-                    // try to read text only when enough confidence in yolo detection
-                    val ocrStart = SystemClock.uptimeMillis()
-                    val recognizedText = textRecognizer.recognizeTextInBoundingBox(bitmap, cropRect, label)
-                    val ocrTime = SystemClock.uptimeMillis() - ocrStart
-                    totalOcrTime += ocrTime
-
-                    if (recognizedText != null) {
-                        Log.i("OCR", "Recognized in ${ocrTime}ms: [$label] = $recognizedText")
-                        // add text to detection
-                        detection.text = recognizedText.lowercase()
-                    } else {
-                        Log.i("OCR", "No text found in $label (${ocrTime}ms)")
-                    }
-                }
-                else {
-                    Log.d("pocessFrame()", "sign was distorted or without text, not reading text")
-                }
-                detections.add(detection)
-                // decide navigation
-                Log.i("processFrame()", "Handling the detection result")
-                handleDetection(detection)
-            }
-
-            val totalTime = SystemClock.uptimeMillis() - decodeStart
-
             Log.i(
-                "TIMING",
-                "Total: ${totalTime}ms (decode: ${decodeTime}ms, YOLO: ${yoloTime}ms, OCR: ${totalOcrTime}ms for ${ocrCount} objects)"
+                "YOLO",
+                "Detection completed in ${yoloTime}ms, found ${results.detections.size} objects"
             )
 
-            if (totalTime > 500) {
-                Log.w("PERFORMANCE", "Processing took > 500ms - client falling behind!")
+            for (yoloDetection in results.detections) {
+                if (navTracker.shouldProcessDetection(yoloDetection.category.label.lowercase())) {
+                    // Only process if user has moved or it's a new sign
+                    processDetection(yoloDetection, bitmap, decodeTime, decodeStart, yoloTime)
+                } else {
+                    Log.d(
+                        "DetectionFilter",
+                        "Skipped detection: ${yoloDetection.category.label} - user hasn't moved"
+                    )
+                }
             }
-
-            checkForTimeout()
-
-        } finally {
+        }
+        finally {
             bitmap.recycle()
         }
+    }
+
+    private suspend fun processDetection(yoloDetection : ObjectDetection, bitmap : Bitmap, decodeTime : Long, decodeStart: Long, yoloTime : Long){
+        var totalOcrTime = 0L
+        var ocrCount = 0
+        val label = yoloDetection.category.label.lowercase()
+        val confidence = yoloDetection.category.confidence
+        val bbox= yoloDetection.boundingBox
+
+        // create detection object to store global detection (yolo + ocr)
+        val detection = Detection()
+        detection.label = label
+        detection.confidence = confidence
+        detection.bbox = bbox
+
+        Log.i(
+            "YOLO",
+            "Detected: $label (${String.format("%.2f", confidence)}) at [${bbox.left.toInt()},${bbox.top.toInt()},${bbox.right.toInt()},${bbox.bottom.toInt()}]"
+        )
+
+        ocrCount++
+        val cropRect = Rect(
+            bbox.left.toInt(),
+            bbox.top.toInt(),
+            bbox.right.toInt(),
+            bbox.bottom.toInt()
+        )
+
+        var isDistorted = false
+        if (shouldCheckDistortion(label, confidence, 0.65f)) { // low confidence and possible sign of interest
+            Log.d("processFrame()", "low confidence frame, checking distortion")
+            // check if on the side and distorted
+            if (DistortionChecker.isSignDistorted(bitmap, cropRect)) {
+                isDistorted = true
+                // check on which side the sign is
+                Log.d("processFrame()", "Sign distorted, getting which side is on")
+                val onWhichSide: String = getSignPosition(bitmap, cropRect)
+                lastSideDetectionTimestamp =
+                    SystemClock.uptimeMillis() - lastSideDetectionTimestamp
+
+                if (onWhichSide.isNotEmpty() && lastSideDetectionTimestamp > SIDE_MOVEMENT_COOLDOWN) {
+                    Log.d("processFrame()", "Sign on $onWhichSide")
+                    val instruction = "There is a potentially helpful sign  on your $onWhichSide, get closer to it and face it to get a more accurate detection"
+                    emitVocalCommand(instruction)
+                }
+            }
+        }
+        if (shouldRunOCR(label) && !isDistorted) {
+            // try to read text only when enough confidence in yolo detection
+            val ocrStart = SystemClock.uptimeMillis()
+            val recognizedText = textRecognizer.recognizeTextInBoundingBox(bitmap, cropRect, label)
+            val ocrTime = SystemClock.uptimeMillis() - ocrStart
+            totalOcrTime += ocrTime
+
+            if (recognizedText != null) {
+                Log.i("OCR", "Recognized in ${ocrTime}ms: [$label] = $recognizedText")
+                // add text to detection
+                detection.text = recognizedText.lowercase()
+            } else {
+                Log.i("OCR", "No text found in $label (${ocrTime}ms)")
+            }
+        }
+        else {
+            Log.d("pocessFrame()", "sign was distorted or without text, not reading text")
+        }
+        detections.add(detection)
+        // decide navigation
+        Log.i("processFrame()", "Handling the detection result")
+        handleDetection(detection)
+
+
+        val totalTime = SystemClock.uptimeMillis() - decodeStart
+
+        Log.i(
+            "TIMING",
+            "Total: ${totalTime}ms (decode: ${decodeTime}ms, YOLO: ${yoloTime}ms, OCR: ${totalOcrTime}ms for ${ocrCount} objects)"
+        )
+
+        if (totalTime > 500) {
+            Log.w("PERFORMANCE", "Processing took > 500ms - client falling behind!")
+        }
+
+        checkForTimeout()
     }
 
     /**
@@ -474,7 +492,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             detectionLabel.contains(target, ignoreCase = true)
         }
     }
-    private fun shouldCHeckDistortion(label: String, confidence : Float, conf_treshold: Float) : Boolean{
+    private fun shouldCheckDistortion(label: String, confidence : Float, conf_treshold: Float) : Boolean{
         return confidence < conf_treshold && isSignPoossibleTarget(label)
     }
 
@@ -585,6 +603,8 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                 Log.d("handleDetection()", "Emitting stop command")
                 lastInstruction = ""
                 lastInstructionTime = 0L
+                navTracker.resetDetectionHistory()
+
                 viewModelScope.launch {
                     _navigationEvents.emit(NavigationEvent.StopNavigation)
                 }
@@ -593,6 +613,8 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private fun emitVocalCommand(message : String) {
+        var directionToTrack: Direction? = null
+
         Log.d("handleDetection()", "emitting vocal command")
         val currentTime = System.currentTimeMillis()
         val isSpeaking = (currentTime - lastInstructionTime) < SPEECH_COOLDOWN
@@ -601,14 +623,52 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         Log.d("emitVocalCommand()", "isSpeaking; $isSpeaking, old Sign: $oldCOmmand last instruciton: $lastInstruction, message: $message")
         // emit a command only when no other command was just spoken, the instruction is different or too old 
         if (!isSpeaking && ( lastInstruction != message || oldCOmmand)) {
-             lastInstructionTime = currentTime
+            lastInstructionTime = currentTime
             lastInstruction = message
 
             viewModelScope.launch {
                 _navigationEvents.emit(NavigationEvent.Speak(message))
+
+                if (directionToTrack != null) {
+                    navTracker.startTrackingCompliance(directionToTrack)
+
+                    // Check compliance after 3 seconds
+                    delay(3000L)
+                    checkUserCompliance()
+                }
             }
 
         }
+    }
+    private suspend fun checkUserCompliance() {
+        val compliance = navTracker.checkCompliance()
+
+        if (compliance != null && compliance.compliant == false && compliance.confidence > 0.7f) {
+            // User went wrong way - provide correction
+            val correction = when {
+                compliance.expected == Direction.TURN_LEFT && compliance.actual == Direction.TURN_RIGHT ->
+                    "You turned right. The destination is on the LEFT. Turn around."
+
+                compliance.expected == Direction.TURN_RIGHT && compliance.actual == Direction.TURN_LEFT ->
+                    "You turned left. The destination is on the RIGHT. Turn around."
+
+                compliance.expected == Direction.TURN_LEFT && compliance.actual == Direction.STRAIGHT ->
+                    "You're going straight. Please turn LEFT."
+
+                compliance.expected == Direction.TURN_RIGHT && compliance.actual == Direction.STRAIGHT ->
+                    "You're going straight. Please turn RIGHT."
+
+                compliance.expected == Direction.STRAIGHT && compliance.actual != Direction.STRAIGHT ->
+                    "Continue STRAIGHT ahead, don't turn."
+
+                else ->
+                    "You went ${compliance.actual}. Please go ${compliance.expected} instead."
+            }
+
+            _navigationEvents.emit(NavigationEvent.Speak(correction))
+        }
+
+        navTracker.stopTrackingCompliance()
     }
 
     /**
@@ -820,6 +880,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     override fun onCleared() {
         super.onCleared()
         disconnect()
+        navTracker.stopSensors()
         _isSocketConnected.value = false
         _connectionStatus.value = ConnectionStatus.DISCONNECTED  // NEW: Update status
         destination = ""
