@@ -63,9 +63,6 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     private val _messages = MutableStateFlow("")
     val messages: StateFlow<String> = _messages
 
-//    private val _ocrResults = MutableStateFlow<String?>(null)
-//    val ocrResults: StateFlow<String?> = _ocrResults.asStateFlow()
-
     // Frame statistics
     private val _frameStats = MutableStateFlow("")
     val frameStats: StateFlow<String> = _frameStats.asStateFlow()
@@ -113,6 +110,15 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     var lastInstructionTime : Long = 0L
     var matchCounter = 0
     private val SPEECH_COOLDOWN = 3000L // 3 Seconds
+    private val OLD_SIGN_COOLDOWN = 5000L // 5 seconds between repeating same sign
+    // Track when last sign was a relevant sign
+    private var lastSignTime = 0L
+
+    // Track when we last gave timeout guidance
+    private var lastTimeoutGuidanceTime = 0L
+
+    // Confidence level (degrades over time)
+    private var navigationConfidence = 1.0f
 
     // Sign on the side handling
     var lastSideDetectionTimestamp = 0L
@@ -378,7 +384,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             for (yoloDetection in results.detections) {
                 val label = yoloDetection.category.label.lowercase()
                 val confidence = yoloDetection.category.confidence
-                var bbox= yoloDetection.boundingBox
+                val bbox= yoloDetection.boundingBox
 
                 // create detection object to store global detection (yolo + ocr)
                 val detection = Detection()
@@ -400,20 +406,22 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                 )
 
                 var isDistorted = false
-                if (shouldCHeckDistortion(label, confidence, 0.5f)) { // low confidence and possible sign of interest
+                if (shouldCHeckDistortion(label, confidence, 0.65f)) { // low confidence and possible sign of interest
                     Log.d("processFrame()", "low confidence frame, checking distortion")
                     // check if on the side and distorted
                     if (DistortionChecker.isSignDistorted(bitmap, cropRect)) {
                         isDistorted = true
                         // check on which side the sign is
                         Log.d("processFrame()", "Sign distorted, getting which side is on")
-                        var onWhichSide: String = getSignPosition(bitmap, cropRect)
+                        val onWhichSide: String = getSignPosition(bitmap, cropRect)
                         lastSideDetectionTimestamp =
                             SystemClock.uptimeMillis() - lastSideDetectionTimestamp
 
-                        if (onWhichSide.isNotEmpty() && lastSideDetectionTimestamp > SIDE_MOVEMENT_COOLDOWN)
+                        if (onWhichSide.isNotEmpty() && lastSideDetectionTimestamp > SIDE_MOVEMENT_COOLDOWN) {
                             Log.d("processFrame()", "Sign on $onWhichSide")
-                        _navigationEvents.emit(NavigationEvent.Speak("There is a ${label}sign  on the $onWhichSide side, get closer to it and face it to get better readings"))
+                            val instruction = "There is a potentially helpful sign  on your $onWhichSide, get closer to it and face it to get a more accurate detection"
+                            emitVocalCommand(instruction)
+                        }
                     }
                 }
                 if (shouldRunOCR(label) && !isDistorted) {
@@ -451,10 +459,13 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                 Log.w("PERFORMANCE", "Processing took > 500ms - client falling behind!")
             }
 
+            checkForTimeout()
+
         } finally {
             bitmap.recycle()
         }
     }
+
     /**
      * Determine if OCR should run for this detection class
      */
@@ -478,8 +489,6 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         if (destination.isEmpty())
             return
 
-        val currentTime = System.currentTimeMillis()
-        val isSpeaking = (currentTime - lastInstructionTime) < SPEECH_COOLDOWN
         var instruction = ""
         var shouldEmit = false
         var stopNavigation = false
@@ -488,11 +497,17 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         val isExitSearch = destination == "exit"
         val textMatch = FuzzyLogic.isMatch(detection.text, destination)
 
+        if (isSignPoossibleTarget(detection.label) && detection.text.isNotEmpty()){
+            lastSignTime = SystemClock.uptimeMillis()
+            navigationConfidence = 1.0f
+            Log.d("Navigation", "Sign detected, confidence reset")
+        }
+
         // Check what sign was found
         when (detection.label) {
             "room" -> {
                 if (!isExitSearch){
-                    if (textMatch) {
+                    if (textMatch && detection.confidence > 0.75) {
                         instruction = "Room found"
                         shouldEmit = true
                         stopNavigation = true
@@ -560,28 +575,41 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         }
 
         Log.d("FuzzyLogic()", "Fuzzy logic match: $textMatch")
-        Log.d("handleDetection()", "shouldEmit: $shouldEmit, isSpeaking: $isSpeaking, lastInstruction: $lastInstruction, instruction: $instruction")
+        Log.d("handleDetection()", "shouldEmit: $shouldEmit, lastInstruction: $lastInstruction, instruction: $instruction")
 
         // Emit vocal command if we have an instruction to give (positive or negative)
-        if (shouldEmit && !isSpeaking && lastInstruction != instruction) {
-            Log.d("handleDetection()", "emitting vocal command")
-            lastInstruction = instruction
-            lastInstructionTime = currentTime
-
-            viewModelScope.launch {
-                _navigationEvents.emit(NavigationEvent.Speak(instruction))
-
-                // If the room was found, stop navigation
-                if (stopNavigation) {
-                    Log.d("handleDetection()", "Emitting stop command")
-                    lastInstruction = ""
-                    lastInstructionTime = 0L
+        if (shouldEmit) {
+            emitVocalCommand(instruction)
+            // If the room was found, stop navigation
+            if (stopNavigation) {
+                Log.d("handleDetection()", "Emitting stop command")
+                lastInstruction = ""
+                lastInstructionTime = 0L
+                viewModelScope.launch {
                     _navigationEvents.emit(NavigationEvent.StopNavigation)
                 }
             }
         }
     }
 
+    private fun emitVocalCommand(message : String) {
+        Log.d("handleDetection()", "emitting vocal command")
+        val currentTime = System.currentTimeMillis()
+        val isSpeaking = (currentTime - lastInstructionTime) < SPEECH_COOLDOWN
+        val oldCOmmand = (lastInstruction == message) && (currentTime - lastInstructionTime > OLD_SIGN_COOLDOWN)
+
+        Log.d("emitVocalCommand()", "isSpeaking; $isSpeaking, old Sign: $oldCOmmand last instruciton: $lastInstruction, message: $message")
+        // emit a command only when no other command was just spoken, the instruction is different or too old 
+        if (!isSpeaking && ( lastInstruction != message || oldCOmmand)) {
+             lastInstructionTime = currentTime
+            lastInstruction = message
+
+            viewModelScope.launch {
+                _navigationEvents.emit(NavigationEvent.Speak(message))
+            }
+
+        }
+    }
 
     /**
      * Add or remove OCR target classes dynamically
@@ -613,7 +641,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
      */
     private fun getSignPosition(bitmap: Bitmap, bbox: Rect): String{
         val xcenter = bitmap.width/2
-        val ycenter = bitmap.height/2
+        bitmap.height/2
 
         if (bbox.left < xcenter && bbox.right < xcenter)
             return "left"
@@ -714,6 +742,80 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             throw IllegalArgumentException("Unknown ViewModel class")
         }
     }
+
+    private fun checkForTimeout() {
+        val currentTime = SystemClock.uptimeMillis()
+
+        // Only check every 2 seconds to avoid spam
+        if (currentTime - lastTimeoutGuidanceTime < 2000L) {
+            return
+        }
+
+        // First time running? Give initial guidance
+        if (lastSignTime == 0L && currentTime > 3000L) {
+            giveTimeoutGuidance("Looking for signs to $destination. Please move forward slowly.", currentTime)
+            return
+        }
+
+        val timeSinceLastSign = currentTime - lastSignTime
+
+        // Calculate degrading confidence
+        navigationConfidence = when {
+            timeSinceLastSign < 5000L -> 1.0f    // 0-5s: Full confidence
+            timeSinceLastSign < 10000L -> 0.7f   // 5-10s: Good confidence
+            timeSinceLastSign < 20000L -> 0.5f   // 10-20s: Medium confidence
+            timeSinceLastSign < 30000L -> 0.3f   // 20-30s: Low confidence
+            else -> 0.1f                          // 30s+: Critical
+        }
+
+        // Provide guidance based on time elapsed
+        when {
+            // 5-10 seconds: Gentle reminder
+            timeSinceLastSign in 5000L..10000L -> {
+                giveTimeoutGuidance("No new signs detected. Continue forward and look for signs.", currentTime)
+            }
+
+            // 10-20 seconds: More directive
+            timeSinceLastSign in 10000L..20000L -> {
+                giveTimeoutGuidance("Still no signs. Keep moving and scan the walls for directional signs.", currentTime)
+            }
+
+            // 20-30 seconds: Suggest exploration
+            timeSinceLastSign in 20000L..30000L -> {
+                giveTimeoutGuidance("No signs for ${timeSinceLastSign/1000} seconds. Turn slowly to scan the area.", currentTime)
+            }
+
+            // 30+ seconds: Critical - suggest help
+            timeSinceLastSign > 30000L -> {
+                giveTimeoutGuidance("Limited navigation guidance. Consider asking for directions to $destination.", currentTime)
+            }
+        }
+    }
+
+    private fun giveTimeoutGuidance(message: String, currentTime: Long) {
+        // Don't repeat the same message
+        if (message == lastInstruction) {
+            return
+        }
+
+        // Respect speech cooldown
+        if (currentTime - lastInstructionTime < SPEECH_COOLDOWN) {
+            return
+        }
+
+        Log.d("TimeoutGuidance", "Confidence: $navigationConfidence, Message: $message")
+
+        // Update state
+        lastInstruction = message
+        lastInstructionTime = currentTime
+        lastTimeoutGuidanceTime = currentTime
+
+        // Emit the guidance
+        viewModelScope.launch {
+            _navigationEvents.emit(NavigationEvent.Speak(message))
+        }
+    }
+
 
     override fun onCleared() {
         super.onCleared()
