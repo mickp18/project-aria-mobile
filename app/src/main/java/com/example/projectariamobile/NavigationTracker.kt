@@ -465,7 +465,7 @@ class NavigationTracker(context: Context) : SensorEventListener {
                 stepCount++
                 lastStepTime = now
                 updatePosition()
-                Log.d("StepDetection", "Step #$stepCount detected, peak=$accelPeak")
+                //Log.d("StepDetection", "Step #$stepCount detected, peak=$accelPeak")
             }
         }
 

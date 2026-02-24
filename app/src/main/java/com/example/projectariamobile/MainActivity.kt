@@ -297,7 +297,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
                 confirmationDialog?.dismiss()
                 startVoiceCapture()
             }
-            clean.contains("cancel") || clean.contains("stop") -> {
+            clean.contains("cancel") || clean.contains("stop") && !tts.isSpeaking -> {
                 confirmationDialog?.dismiss()
                 resetVoiceFlow()
             }
@@ -316,7 +316,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         val dataCommand = mapSpeechToCommand(pendingGoal)
         tts.speak("Confirmed, going to $dataCommand. Connecting.", TextToSpeech.QUEUE_FLUSH, null, null)
 
-        webSocketViewModel.destination = dataCommand.lowercase()
+        webSocketViewModel.startNavigation(dataCommand.lowercase())
 
         lifecycleScope.launch {
             webSocketViewModel.connect()
@@ -395,6 +395,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
             webSocketViewModel.navigationEvents.collect { event ->
                 when(event){
                     is NavigationEvent.Speak -> {
+
                         tts.speak(event.message, TextToSpeech.QUEUE_ADD, null, null)
                     }
                     is NavigationEvent.StopNavigation -> {
