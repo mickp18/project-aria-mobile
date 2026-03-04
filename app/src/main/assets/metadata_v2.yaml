@@ -1,0 +1,29 @@
+description: Ultralytics YOLO11n model trained on data.yaml
+author: Ultralytics
+date: '2026-03-04T01:22:11.843065'
+version: 8.3.222
+license: AGPL-3.0 License (https://ultralytics.com/license)
+docs: https://docs.ultralytics.com
+stride: 32
+task: detect
+batch: 1
+imgsz:
+- 800
+- 800
+names:
+  0: exit_right
+  1: room
+  2: room_direction_left
+  3: room_direction_right
+  4: stair_sign
+  5: exit_left
+  6: opening
+  7: exit
+  8: staircase
+args:
+  batch: 1
+  fraction: 1.0
+  half: false
+  int8: false
+  nms: false
+channels: 3
