@@ -631,8 +631,8 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun connect() {
         _connectionStatus.value = ConnectionStatus.CONNECTING
-        // webSocketClient.setSocketUrl("ws://192.168.1.98:8080")
-        webSocketClient.setSocketUrl("ws://192.168.0.56:8080")
+        webSocketClient.setSocketUrl("ws://192.168.1.2:8080")
+//        webSocketClient.setSocketUrl("ws://192.168.0.56:8080")
         webSocketClient.connect()
         webSocketClient.sendMessage("start")
     }
