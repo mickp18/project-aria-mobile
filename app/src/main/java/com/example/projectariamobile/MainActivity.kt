@@ -33,13 +33,13 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
     private lateinit var stopButton: Button
     private lateinit var tts: TextToSpeech
 
-    // Vosk Engines
+    // Vosk engines
     private var speechService: SpeechService? = null
     private var voskModelEn: Model? = null
     private var consecutiveVoskFailures = 0
     private val MAX_VOSK_RETRIES = 3
 
-    // State Tracking
+    // State tracking
     private var confirmationDialog: AlertDialog? = null
     private var pendingGoal: String = ""
     private var isWaitingForConfirmation = false
@@ -47,15 +47,18 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
 
     private val webSocketViewModel: WebSocketViewModel by viewModels()
 
-    // Track if we are in "wake mode" or in navigation
     private var isAwaitingWakeWord = true
 
-    // Permission Handler
+    // Permission handler
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { isGranted: Boolean ->
         if (isGranted) startVoiceCapture()
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Lifecycle
+    // ─────────────────────────────────────────────────────────────────────────
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -73,9 +76,32 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         observeViewModel()
     }
 
+    override fun onPause() {
+        super.onPause()
+        if (isAwaitingWakeWord && !isVoiceFlowActive) stopVosk()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (isAwaitingWakeWord && !isVoiceFlowActive && speechService == null) {
+            startBackgroundListening()
+        }
+    }
+
+    override fun onDestroy() {
+        speechService?.stop()
+        speechService?.shutdown()
+        if (::tts.isInitialized) tts.shutdown()
+        super.onDestroy()
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // UI
+    // ─────────────────────────────────────────────────────────────────────────
+
     private fun setupUI() {
         startButton = findViewById(R.id.startButton)
-        stopButton = findViewById(R.id.stopButton)
+        stopButton  = findViewById(R.id.stopButton)
 
         ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.main)) { v, insets ->
             val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
@@ -84,23 +110,19 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         }
 
         startButton.setOnClickListener { checkPermissionAndStart() }
-        stopButton.setOnClickListener {
-            webSocketViewModel.disconnect()
-            isAwaitingWakeWord = true
-            startBackgroundListening()
-        }
+        stopButton.setOnClickListener  { handleStop(StopReason.MANUAL_STOP) }
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Vosk
+    // ─────────────────────────────────────────────────────────────────────────
 
     private fun initVoskModels() {
         startButton.isEnabled = false
-
-        // Unpack English
         StorageService.unpack(this, "vosk-model-small-en-us-0.15", "model-en",
             { enModel ->
-                this.voskModelEn = enModel
+                voskModelEn = enModel
                 Log.d("VOSK", "English model loaded.")
-
-                // Automatically start listening for "Start" command
                 runOnUiThread {
                     startButton.isEnabled = true
                     startBackgroundListening()
@@ -113,7 +135,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
                         .setTitle("Initialization Error")
                         .setMessage("Speech recognition failed to load. Please restart the app.")
                         .setPositiveButton("Retry") { _, _ -> initVoskModels() }
-                        .setNegativeButton("Exit") { _, _ -> finish() }
+                        .setNegativeButton("Exit")  { _, _ -> finish() }
                         .setCancelable(false)
                         .show()
                 }
@@ -121,33 +143,26 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         )
     }
 
-    // Put app in "wake mode"
     private fun startBackgroundListening() {
         Log.d("LISTENER", "Waiting for start/stop command")
-        stopVosk() // Ensure clean state
+        stopVosk()
         isAwaitingWakeWord = true
-        isVoiceFlowActive = false
+        isVoiceFlowActive  = false
 
-        val model = voskModelEn
-        if (model == null) {
-            Log.e("VOSK", "Model not loaded, cannot start listening")
-            return
+        val model = voskModelEn ?: run {
+            Log.e("VOSK", "Model not loaded, cannot start listening"); return
         }
 
         try {
-            // Limited grammar for high accuracy wake-word detection
-            val grammar = "[\"start\", \"stop\", \"cancel\" ]"
-            val rec = Recognizer(voskModelEn, 16000.0f, grammar)
+            val grammar = "[\"start\", \"stop\", \"cancel\"]"
+            val rec     = Recognizer(model, 16000.0f, grammar)
             speechService = SpeechService(rec, 16000.0f)
             speechService?.startListening(this)
             Log.d("VOSK", "Listening for wake word...")
         } catch (e: Exception) {
             consecutiveVoskFailures++
             Log.e("VOSK", "Background listen failed (attempt $consecutiveVoskFailures): ${e.message}")
-
-            if (consecutiveVoskFailures >= MAX_VOSK_RETRIES) {
-                showVoskErrorDialog()
-            }
+            if (consecutiveVoskFailures >= MAX_VOSK_RETRIES) showVoskErrorDialog()
         }
     }
 
@@ -156,12 +171,29 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
             AlertDialog.Builder(this)
                 .setTitle("Voice Recognition Error")
                 .setMessage("Voice recognition is not working. You can still use manual buttons.")
-                .setPositiveButton("OK") { _, _ ->
-                    consecutiveVoskFailures = 0
-                }
+                .setPositiveButton("OK") { _, _ -> consecutiveVoskFailures = 0 }
                 .show()
         }
     }
+
+    private fun startVoskListening() {
+        stopVosk()
+        isAwaitingWakeWord = false
+        val modelToUse = voskModelEn ?: run { Log.e("VOSK", "Model not ready"); return }
+
+        try {
+            val grammar = "[\"yes\", \"no\", \"r one\", \"r two\", \"r three\", \"r four\", " +
+                    "\"r one b\", \"r two b\", \"r three b\", \"one\", \"two\", \"three\", " +
+                    "\"four\", \"b\", \"r four b\", \"study room\", \"study\", \"room\", \"exit\"]"
+            val rec = Recognizer(modelToUse, 16000.0f, grammar)
+            speechService = SpeechService(rec, 16000.0f)
+            speechService?.startListening(this)
+        } catch (e: Exception) { resetVoiceFlow() }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // TTS
+    // ─────────────────────────────────────────────────────────────────────────
 
     private fun setupTTS() {
         tts = TextToSpeech(this) { status ->
@@ -174,112 +206,67 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
                         runOnUiThread {
                             when (utteranceId) {
                                 "GOAL_PROMPT", "CONFIRM_PROMPT" -> {
-                                    // Post a delay of 100ms before starting the mic
-                                    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                                        if (!tts.isSpeaking) { // Extra safety check
-                                            startVoskListening()
-                                        }
-                                    }, 100)
+                                    android.os.Handler(android.os.Looper.getMainLooper())
+                                        .postDelayed({
+                                            if (!tts.isSpeaking) startVoskListening()
+                                        }, 100)
                                 }
                             }
                         }
                     }
                 })
-            }
-            else {
+            } else {
                 Log.e("TTS", "TTS initialization failed")
             }
         }
     }
 
-    private fun startVoskListening() {
-        stopVosk()
-        isAwaitingWakeWord = false // Switch to navigation mode
-        val modelToUse = voskModelEn
+    // ─────────────────────────────────────────────────────────────────────────
+    // Vosk callbacks
+    // ─────────────────────────────────────────────────────────────────────────
 
-        if (modelToUse == null) {
-            Log.e("VOSK", "Model not ready")
-            return
-        }
-
-        try {
-            val grammar = "[\"yes\", \"no\", \"r one\", \"r two\",\"r three\", \"r four\", \"r one b\", \"r two b\", \"r three b\", \"one\",\"two\",\"three\",\"four\",\"b\", \"r four b\", \"study room\", \"study\", \"room\", \"exit\"]"
-            val rec = Recognizer(modelToUse, 16000.0f, grammar)
-            speechService = SpeechService(rec, 16000.0f)
-            speechService?.startListening(this)
-        } catch (e: Exception) {
-            resetVoiceFlow()
-        }
-    }
-
-    // --- Vosk Callbacks ---
     override fun onResult(hypothesis: String) {
         val text = JSONObject(hypothesis).optString("text", "")
-        if (text.isEmpty()) {
-            // If we heard nothing, we wait
-            return
-        }
-        if (text == "cancel"){
-            stopVosk()
-            startBackgroundListening()
-            return
-        }
-        if (text == "stop" && webSocketViewModel.isSocketConnected.value == true){
-            handleStop()
+        if (text.isEmpty()) return
+
+        if (text == "cancel") { stopVosk(); startBackgroundListening(); return }
+
+        if (text == "stop" && webSocketViewModel.isSocketConnected.value) {
+            handleStop(StopReason.MANUAL_STOP)
             return
         }
 
-        if (isAwaitingWakeWord){
-            if (text == "start") {
-                stopVosk()
-                runOnUiThread { startVoiceCapture() }
-            }
-            // Else keep listening waiting for start
-        }
-        else {
+        if (isAwaitingWakeWord) {
+            if (text == "start") { stopVosk(); runOnUiThread { startVoiceCapture() } }
+        } else {
             stopVosk()
             runOnUiThread {
-                if (isWaitingForConfirmation) {
-                    handleYesNoResponse(text)
-                } else {
-                    handleGoalSelection(text)
-                }
+                if (isWaitingForConfirmation) handleYesNoResponse(text)
+                else handleGoalSelection(text)
             }
         }
     }
 
     override fun onPartialResult(p0: String?) {}
-    override fun onFinalResult(p0: String?) {}
-    override fun onError(e: Exception?) { resetVoiceFlow() }
-    override fun onTimeout() { resetVoiceFlow() }
-    override fun onPause() {
-        super.onPause()
-        if (isAwaitingWakeWord && !isVoiceFlowActive) {
-            stopVosk() // Stop wake word listening to save battery
-        }
-    }
-    override fun onResume() {
-        super.onResume()
-        if (isAwaitingWakeWord && !isVoiceFlowActive && speechService == null) {
-            startBackgroundListening()
-        }
-    }
+    override fun onFinalResult(p0: String?)   {}
+    override fun onError(e: Exception?)        { resetVoiceFlow() }
+    override fun onTimeout()                   { resetVoiceFlow() }
 
-    // --- Voice Logic Flow ---
+    // ─────────────────────────────────────────────────────────────────────────
+    // Voice flow
+    // ─────────────────────────────────────────────────────────────────────────
 
     private fun handleGoalSelection(goal: String) {
-        // Dismiss any existing dialog first
         confirmationDialog?.dismiss()
-
-        pendingGoal = goal
+        pendingGoal              = goal
         isWaitingForConfirmation = true
 
         confirmationDialog = AlertDialog.Builder(this)
             .setTitle("Confirm Goal")
             .setMessage("Go to: $goal?")
             .setPositiveButton("Yes") { _, _ -> finalizeGoal() }
-            .setNegativeButton("No") { _, _ -> startVoiceCapture() }
-            .setOnCancelListener { resetVoiceFlow() }
+            .setNegativeButton("No")  { _, _ -> startVoiceCapture() }
+            .setOnCancelListener     { resetVoiceFlow() }
             .create()
 
         confirmationDialog?.show()
@@ -297,20 +284,21 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
                 confirmationDialog?.dismiss()
                 startVoiceCapture()
             }
-            clean.contains("cancel") || clean.contains("stop") && !tts.isSpeaking -> {
+            clean.contains("cancel") || (clean.contains("stop") && !tts.isSpeaking) -> {
                 confirmationDialog?.dismiss()
                 resetVoiceFlow()
             }
-            else -> {
-                tts.speak("Please say yes, no, or cancel.", TextToSpeech.QUEUE_FLUSH, null, "CONFIRM_PROMPT")
-            }
+            else -> tts.speak(
+                "Please say yes, no, or cancel.",
+                TextToSpeech.QUEUE_FLUSH, null, "CONFIRM_PROMPT"
+            )
         }
     }
 
     private fun finalizeGoal() {
         stopVosk()
         Log.d("VOICE_FLOW", "Finalizing goal: $pendingGoal")
-        isVoiceFlowActive = false
+        isVoiceFlowActive        = false
         isWaitingForConfirmation = false
 
         val dataCommand = mapSpeechToCommand(pendingGoal)
@@ -320,9 +308,9 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
 
         lifecycleScope.launch {
             webSocketViewModel.connect()
-
-            val status = webSocketViewModel.connectionStatus.first { it is ConnectionStatus.CONNECTED || it is ConnectionStatus.FAILED }
-
+            val status = webSocketViewModel.connectionStatus.first {
+                it is ConnectionStatus.CONNECTED || it is ConnectionStatus.FAILED
+            }
             when (status) {
                 ConnectionStatus.CONNECTED -> {
                     Log.d("WEBSOCKET", "Connected successfully")
@@ -338,7 +326,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
                         showConnectionFailureDialog()
                     }
                 }
-                else -> {  }
+                else -> { }
             }
         }
     }
@@ -347,20 +335,16 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         AlertDialog.Builder(this)
             .setTitle("Connection Failed")
             .setMessage("Could not connect to navigation service. Try again?")
-            .setPositiveButton("Retry") { _, _ ->
-                finalizeGoal()  // Retry with same destination
-            }
-            .setNegativeButton("Choose Different Destination") { _, _ ->
-                startVoiceCapture()  // Start over
-            }
-            .setOnCancelListener {
-                resetVoiceFlow()  // Cancel and go to wake word mode
-            }
+            .setPositiveButton("Retry")  { _, _ -> finalizeGoal() }
+            .setNegativeButton("Choose Different Destination") { _, _ -> startVoiceCapture() }
+            .setOnCancelListener { resetVoiceFlow() }
             .show()
     }
+
     private fun checkPermissionAndStart() {
         if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO)
-            == PackageManager.PERMISSION_GRANTED) {
+            == PackageManager.PERMISSION_GRANTED
+        ) {
             startVoiceCapture()
         } else {
             requestPermissionLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
@@ -372,49 +356,102 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
             Log.d("VOICE_FLOW", "Ignoring start command: already connected.")
             return
         }
-
-        isVoiceFlowActive = true
-        isAwaitingWakeWord = false
-        startButton.isEnabled = false
-        stopButton.isEnabled = false
+        isVoiceFlowActive        = true
+        isAwaitingWakeWord       = false
+        startButton.isEnabled    = false
+        stopButton.isEnabled     = false
         isWaitingForConfirmation = false
         tts.speak("Where do you want to go?", TextToSpeech.QUEUE_FLUSH, null, "GOAL_PROMPT")
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ViewModel observation
+    // ─────────────────────────────────────────────────────────────────────────
 
     private fun observeViewModel() {
         lifecycleScope.launch {
             webSocketViewModel.isSocketConnected.collect { isConnected ->
                 if (!isVoiceFlowActive) {
                     startButton.isEnabled = !isConnected
-                    stopButton.isEnabled = isConnected
+                    stopButton.isEnabled  = isConnected
                 }
             }
         }
 
-        lifecycleScope.launch{
+        lifecycleScope.launch {
             webSocketViewModel.navigationEvents.collect { event ->
-                when(event){
+                when (event) {
                     is NavigationEvent.Speak -> {
-
                         tts.speak(event.message, TextToSpeech.QUEUE_ADD, null, null)
                     }
+
                     is NavigationEvent.StopNavigation -> {
-                        // stop application
-                        Log.d("APP", "STOPPING APPLICATION\n")
+                        Log.d("APP", "STOPPING NAVIGATION")
                         tts.speak("Destination found!", TextToSpeech.QUEUE_FLUSH, null, null)
-                        handleStop()
+                        // Disconnect but do NOT call handleStop here — report already triggered
+                        // by emitIfAllowed via saveReport(DESTINATION_FOUND)
+                        stopVosk()
+                        webSocketViewModel.disconnect()
+                        startBackgroundListening()
+                    }
+
+                    is NavigationEvent.ReportReady -> {
+                        // Notify user that a report was saved
+                        Log.i("Report", "Report ready at: ${event.filePath}")
+                        showReportSavedDialog(event.filePath)
                     }
                 }
-
-
             }
         }
     }
-    private fun handleStop(){
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Stop & report
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Central stop handler. Always saves the report before tearing down.
+     * [reason] is MANUAL_STOP when triggered by the button, DESTINATION_FOUND
+     * when triggered automatically — in that case the report has already been
+     * saved by emitIfAllowed, so we skip the extra call.
+     */
+    private fun handleStop(reason: StopReason = StopReason.MANUAL_STOP) {
         stopVosk()
+        // Only save explicitly on manual stop; arrival saves its own report
+        if (reason == StopReason.MANUAL_STOP) {
+            webSocketViewModel.saveReport(StopReason.MANUAL_STOP)
+        }
         webSocketViewModel.disconnect()
-        tts.speak("Disconnected, stopping...", TextToSpeech.QUEUE_ADD, null, null)
+        tts.speak("Disconnected, stopping.", TextToSpeech.QUEUE_ADD, null, null)
         startBackgroundListening()
+    }
+
+    private fun showReportSavedDialog(filePath: String) {
+        runOnUiThread {
+            AlertDialog.Builder(this)
+                .setTitle("Session Report Saved")
+                .setMessage("Report saved to:\n$filePath")
+                .setPositiveButton("OK", null)
+                .show()
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Helpers
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private fun resetVoiceFlow() {
+        runOnUiThread {
+            tts.stop()
+            stopVosk()
+            isVoiceFlowActive        = false
+            isWaitingForConfirmation = false
+            confirmationDialog?.dismiss()
+            val isConnected       = webSocketViewModel.isSocketConnected.value
+            startButton.isEnabled = !isConnected
+            stopButton.isEnabled  = isConnected
+            startBackgroundListening()
+        }
     }
 
     private fun stopVosk() {
@@ -422,40 +459,17 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         speechService = null
     }
 
-    private fun resetVoiceFlow() {
-        runOnUiThread {
-            tts.stop()
-            stopVosk()
-            isVoiceFlowActive = false
-            isWaitingForConfirmation = false
-            confirmationDialog?.dismiss()
-            val isConnected = webSocketViewModel.isSocketConnected.value ?: false
-            startButton.isEnabled = !isConnected
-            stopButton.isEnabled = isConnected
-
-            // Go back to listening for "Start"
-            startBackgroundListening()
-        }
-    }
-
     private fun mapSpeechToCommand(text: String): String {
         return when (text.lowercase().trim()) {
-            "r one" -> "r1"
-            "r two" -> "r2"
+            "r one"   -> "r1"
+            "r two"   -> "r2"
             "r three" -> "r3"
-            "r four" -> "r4"
+            "r four"  -> "r4"
             "r one b" -> "r1b"
             "r two b" -> "r2b"
             "r three b" -> "r3b"
-            "r four b" -> "r4b"
-            else -> text.replace(" ", "") // Fallback: remove spaces
+            "r four b"  -> "r4b"
+            else -> text.replace(" ", "")
         }
-    }
-
-    override fun onDestroy() {
-        speechService?.stop()
-        speechService?.shutdown()
-        if (::tts.isInitialized) tts.shutdown()
-        super.onDestroy()
     }
 }
