@@ -10,6 +10,7 @@ import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.application
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -140,6 +141,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     private var lookingForStairs       = false
     private var lastStairHintTime      = 0L
     private val STAIR_HINT_COOLDOWN    = 12_000L
+    private var lastTimeoutMessage     = ""
 
     // ── Frame stats ──────────────────────────────────────────────────────────
     private var frameCount     = 0
@@ -155,10 +157,11 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     private val OLD_SIGN_COOLDOWN          = 10_000L
     private val SIDE_COOLDOWN              = 8_000L
     private val PROXIMITY_MIN_AREA_EXIT    = 0.001f
-    private val PROXIMITY_MIN_AREA_ROOMS   = 0.005f
+    private val PROXIMITY_MIN_AREA_ROOMS   = 0.003f
     private val PROXIMITY_MIN_AREA_OPENING = 0.04f
     private val PROXIMITY_MIN_AREA_STAIR   = 0.08f
     private val DISTORTION_CONF            = 0.65f
+    private val TIMEOUT_REPEAT_COOLDOWN    = 30_000L
 
     // ─────────────────────────────────────────────────────────────────────────
     // init
@@ -235,7 +238,9 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
 
             // Record all raw detections
             results.detections.forEach { det ->
+                Log.d("YOLO", "${det.category.label} (${det.category.confidence})")
                 reportManager.recordDetection(det.category.label.lowercase(), qualified = false)
+                saveBitmapToGallery(application, bitmap, "YOLO_${det.category.label}_${System.currentTimeMillis()}.jpg")
             }
 
             if (results.detections.isEmpty()) {
@@ -503,9 +508,9 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             ) {
                 val side = getSignPosition(bitmap, cropRect)
                 val hint = if (side.isNotEmpty())
-                    "There's a sign on your $side. Turn to face it for a better reading."
+                    "There's a $label sign on your $side. Turn to face it for a better reading."
                 else
-                    "A sign is at an angle. Move closer and face it directly."
+                    "There is a $label sign."
 
                 val now = SystemClock.uptimeMillis()
                 if (now - lastSideDetectionTime > SIDE_COOLDOWN) {
@@ -704,11 +709,9 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     // =========================================================================
     //  TIMEOUT GUIDANCE
     // =========================================================================
-
     private fun checkForTimeout() {
         val now = SystemClock.uptimeMillis()
         if (now - lastTimeoutGuidanceTime < 2_000L) return
-        if (forkState !is ForkState.None) return   // fork state handles its own pacing
 
         if (lastSignTime == 0L && now > 5_000L) {
             giveTimeoutGuidance("Looking for signs to $destination. Please move forward slowly.", now)
@@ -716,21 +719,21 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         }
 
         val gap = now - lastSignTime
-        navigationConfidence = when {
-            gap < 30_000L -> 1.0f
-            gap < 55_000L -> 0.7f
-            gap < 75_000L -> 0.5f
-            gap < 95_000L -> 0.3f
-            else          -> 0.1f
-        }
 
-        val msg = when (gap) {
-            in 15_000L..30_000L -> "No new signs. Continue forward and look for signs."
-            in 35_000L..55_000L -> "Still no signs. Keep moving and scan the walls."
-            in 55_000L..75_000L -> "No signs for ${gap / 1000} seconds. Turn slowly to scan the area."
-            else -> if (gap > 95_000L) "Consider asking for directions to $destination or turn around." else null
-        }
-        msg?.let { giveTimeoutGuidance(it, now) }
+        // Each bucket is wider — user stays in it longer before escalating
+        val msg = when {
+            gap < 15_000L  -> null   // silent, user is just walking
+            gap < 45_000L  -> "No signs visible yet. Keep moving forward and scan the walls."
+            gap < 75_000L  -> "Still no signs. Try turning slowly to check both sides."
+            gap < 105_000L -> "I haven't found signs in a while. Try retracing your steps to the last sign."
+            else           -> "Consider asking someone nearby for directions to $destination."
+        } ?: return
+
+        // Don't repeat the same message within 30 seconds
+        if (msg == lastTimeoutMessage && now - lastTimeoutGuidanceTime < TIMEOUT_REPEAT_COOLDOWN) return
+
+        lastTimeoutMessage = msg
+        giveTimeoutGuidance(msg, now)
     }
 
     private fun giveTimeoutGuidance(message: String, now: Long) {
