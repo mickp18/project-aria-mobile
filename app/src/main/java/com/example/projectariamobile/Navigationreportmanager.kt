@@ -21,16 +21,16 @@ enum class StopReason {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Per-frame sample (one row in the raw timing table)
+// Per-frame sample
 // ─────────────────────────────────────────────────────────────────────────────
 
 data class FrameSample(
     val frameIndex     : Int,
     val yoloMs         : Long,
-    val ocrMs          : Long,           // 0 if OCR was not run this frame
+    val ocrMs          : Long,
     val totalFrameMs   : Long,
     val detectionsCount: Int,
-    val droppedBefore  : Int             // dropped frames since last processed frame
+    val droppedBefore  : Int
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -38,16 +38,33 @@ data class FrameSample(
 // ─────────────────────────────────────────────────────────────────────────────
 
 data class ForkEvent(
-    val timestampMs   : Long,
-    val directions    : List<String>,
-    val outcome       : String           // filled in when fork resolves
+    val timestampMs : Long,
+    val directions  : List<String>,
+    val outcome     : String
 )
 
-data class YoloDetection(
-    val label : String,
-    val confidence : Float,
-    val bbox : android.graphics.RectF,
-    val timestamp : Long
+// ─────────────────────────────────────────────────────────────────────────────
+// Rejection reason — one value per disqualification gate in qualifyDetections
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum class RejectionReason {
+    NOT_TARGET,   // isSignPossibleTarget() returned false
+    TOO_SMALL,    // area < PROXIMITY_MIN_AREA_* threshold
+    DISTORTED,    // DistortionChecker flagged it AND confidence < DISTORTION_CONF
+    OCR_EMPTY     // OCR ran but returned empty/null text
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rejected detection record
+// ─────────────────────────────────────────────────────────────────────────────
+
+data class RejectedDetection(
+    val elapsedMs  : Long,
+    val label      : String,
+    val confidence : Float,   // YOLO confidence (0–1)
+    val areaPct    : Float,   // bbox area as % of frame — compare to threshold × 100
+    val reason     : RejectionReason,
+    val ocrText    : String   // non-empty only for OCR_EMPTY (shows what OCR actually returned)
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -61,30 +78,30 @@ class NavigationReportManager(private val context: Context) {
     private var frameIndex     = 0
 
     // ── Detection class counters ─────────────────────────────────────────────
-    private val detectionCounts = mutableMapOf<String, Int>()   // label → total seen
-    private val qualifiedCounts = mutableMapOf<String, Int>()   // label → survived qualification
-    private val instructionLog  = mutableListOf<Pair<Long, String>>() // (elapsed ms, text)
-    private val yoloDetections  = mutableListOf<YoloDetection>()
+    private val detectionCounts = mutableMapOf<String, Int>()
+    private val qualifiedCounts = mutableMapOf<String, Int>()
+    private val instructionLog  = mutableListOf<Pair<Long, String>>()
+
+    // ── Rejection log (thread-safe) ──────────────────────────────────────────
+    private val rejectedDetections = CopyOnWriteArrayList<RejectedDetection>()
 
     // ── Fork events ──────────────────────────────────────────────────────────
     private val forkEvents = mutableListOf<ForkEvent>()
 
-    // ── Frame counters (mirrors ViewModel stats) ─────────────────────────────
-    private var totalFramesReceived = 0
-    private var totalFramesDropped  = 0
+    // ── Frame counters ───────────────────────────────────────────────────────
+    private var totalFramesReceived       = 0
+    private var totalFramesDropped        = 0
     private var droppedSinceLastProcessed = 0
 
     // ── Session timing ───────────────────────────────────────────────────────
-    private var sessionStartMs   = 0L
-    private var navigationStartMs = 0L   // set when startNavigation() is called
-    private var sessionEndMs     = 0L
-    private var destination      = ""
+    private var sessionStartMs    = 0L
+    private var navigationStartMs = 0L
+    private var sessionEndMs      = 0L
+    private var destination       = ""
 
     // ── Stair/warning counters ───────────────────────────────────────────────
-    private var staircaseWarnings = 0
-    private var stairGuidanceHints = 0
-
-    // ── Timeout guidance counter ─────────────────────────────────────────────
+    private var staircaseWarnings    = 0
+    private var stairGuidanceHints   = 0
     private var timeoutGuidanceCount = 0
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -95,19 +112,19 @@ class NavigationReportManager(private val context: Context) {
         frameSamples.clear()
         detectionCounts.clear()
         qualifiedCounts.clear()
-        yoloDetections.clear()
         instructionLog.clear()
+        rejectedDetections.clear()
         forkEvents.clear()
-        frameIndex               = 0
-        totalFramesReceived      = 0
-        totalFramesDropped       = 0
+        frameIndex                = 0
+        totalFramesReceived       = 0
+        totalFramesDropped        = 0
         droppedSinceLastProcessed = 0
-        staircaseWarnings        = 0
-        stairGuidanceHints       = 0
-        timeoutGuidanceCount     = 0
-        destination              = dest
-        sessionStartMs           = SystemClock.uptimeMillis()
-        navigationStartMs        = sessionStartMs
+        staircaseWarnings         = 0
+        stairGuidanceHints        = 0
+        timeoutGuidanceCount      = 0
+        destination               = dest
+        sessionStartMs            = SystemClock.uptimeMillis()
+        navigationStartMs         = sessionStartMs
     }
 
     fun endSession(reason: StopReason): File? {
@@ -116,7 +133,7 @@ class NavigationReportManager(private val context: Context) {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Frame recording API  (called from ViewModel)
+    // Frame recording API
     // ─────────────────────────────────────────────────────────────────────────
 
     fun recordFrameReceived(dropped: Boolean) {
@@ -151,6 +168,39 @@ class NavigationReportManager(private val context: Context) {
         if (qualified) qualifiedCounts[label] = (qualifiedCounts[label] ?: 0) + 1
     }
 
+    /**
+     * Record a detection that was rejected during qualification.
+     * Safe to call from any thread (Dispatchers.Default).
+     *
+     * @param label      YOLO class label
+     * @param confidence YOLO confidence (0–1)
+     * @param bboxArea   bbox.width() * bbox.height()  (pixels²)
+     * @param frameArea  bitmap.width * bitmap.height  (pixels²)
+     * @param reason     which gate rejected it
+     * @param ocrText    pass OCR result if reason == OCR_EMPTY, else leave default ""
+     */
+    fun recordRejectedDetection(
+        label      : String,
+        confidence : Float,
+        bboxArea   : Float,
+        frameArea  : Float,
+        reason     : RejectionReason,
+        ocrText    : String = ""
+    ) {
+        val elapsed = SystemClock.uptimeMillis() - navigationStartMs
+        val areaPct = if (frameArea > 0f) (bboxArea / frameArea) * 100f else 0f
+        rejectedDetections.add(
+            RejectedDetection(
+                elapsedMs  = elapsed,
+                label      = label,
+                confidence = confidence,
+                areaPct    = areaPct,
+                reason     = reason,
+                ocrText    = ocrText
+            )
+        )
+    }
+
     fun recordInstruction(text: String) {
         val elapsed = SystemClock.uptimeMillis() - navigationStartMs
         instructionLog.add(Pair(elapsed, text))
@@ -168,11 +218,6 @@ class NavigationReportManager(private val context: Context) {
         }
     }
 
-    fun recordYoloDetection(label: String, confidence: Float, bbox: android.graphics.RectF, timestamp: Long)
-    {
-        yoloDetections.add(YoloDetection(label, confidence, bbox, timestamp))
-    }
-
     fun recordStaircaseWarning()  { staircaseWarnings++ }
     fun recordStairGuidanceHint() { stairGuidanceHints++ }
     fun recordTimeoutGuidance()   { timeoutGuidanceCount++ }
@@ -188,10 +233,8 @@ class NavigationReportManager(private val context: Context) {
                 "NavReports"
             )
             dir.mkdirs()
-
             val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
             val file      = File(dir, "nav_report_${destination}_$timestamp.txt")
-
             file.writeText(buildReportText(reason))
             Log.i("Report", "Saved to ${file.absolutePath}")
             file
@@ -204,9 +247,9 @@ class NavigationReportManager(private val context: Context) {
     private fun buildReportText(reason: StopReason): String {
         val sb = StringBuilder()
 
-        val sessionDurationMs  = sessionEndMs - sessionStartMs
-        val navDurationMs      = sessionEndMs - navigationStartMs
-        val samples            = frameSamples.toList()
+        val sessionDurationMs = sessionEndMs - sessionStartMs
+        val navDurationMs     = sessionEndMs - navigationStartMs
+        val samples           = frameSamples.toList()
 
         // ── Header ────────────────────────────────────────────────────────────
         sb.appendLine("═══════════════════════════════════════════════════════════")
@@ -221,11 +264,8 @@ class NavigationReportManager(private val context: Context) {
 
         // ── Frame throughput ──────────────────────────────────────────────────
         sb.appendLine("── FRAME THROUGHPUT ────────────────────────────────────────")
-        val avgFps = if (navDurationMs > 0)
-            (samples.size * 1000.0 / navDurationMs) else 0.0
-        val dropRate = if (totalFramesReceived > 0)
-            (totalFramesDropped * 100.0 / totalFramesReceived) else 0.0
-
+        val avgFps   = if (navDurationMs > 0) (samples.size * 1000.0 / navDurationMs) else 0.0
+        val dropRate = if (totalFramesReceived > 0) (totalFramesDropped * 100.0 / totalFramesReceived) else 0.0
         sb.appendLine("  Frames received   : $totalFramesReceived")
         sb.appendLine("  Frames processed  : ${samples.size}")
         sb.appendLine("  Frames dropped    : $totalFramesDropped  (${fmtPct(dropRate)})")
@@ -244,7 +284,6 @@ class NavigationReportManager(private val context: Context) {
             sb.appendLine("  P99   : ${percentile(yoloTimes, 99)} ms")
             sb.appendLine()
 
-            // ── OCR timing (only frames where OCR ran) ─────────────────────
             val ocrTimes = samples.filter { it.ocrMs > 0 }.map { it.ocrMs }
             sb.appendLine("── OCR TIMING  (${ocrTimes.size} frames with OCR) ──────────────")
             if (ocrTimes.isNotEmpty()) {
@@ -258,7 +297,6 @@ class NavigationReportManager(private val context: Context) {
             }
             sb.appendLine()
 
-            // ── Total frame processing time ────────────────────────────────
             val totalTimes = samples.map { it.totalFrameMs }
             sb.appendLine("── TOTAL FRAME PROCESSING TIME ─────────────────────────────")
             sb.appendLine("  Min   : ${totalTimes.min()} ms")
@@ -277,22 +315,13 @@ class NavigationReportManager(private val context: Context) {
             sb.appendLine("  (none)")
         } else {
             allLabels.forEach { label ->
-                val raw  = detectionCounts[label]  ?: 0
+                val raw  = detectionCounts[label] ?: 0
                 val qual = qualifiedCounts[label]  ?: 0
                 sb.appendLine("  ${padR(label, 24)}  ${padL(raw.toString(), 7)}  ${padL(qual.toString(), 9)}")
             }
         }
         sb.appendLine()
 
-        // Display all the yolo detections
-        sb.appendLine("── YOLO DETECTIONS ───────────────────────────────────────────")
-        for (det : YoloDetection in yoloDetections){
-            val area = det.bbox.width()*det.bbox.height()
-            sb.appendLine("  ${padR(det.label, 24)}  ${padR(det.confidence.toString(), 10)}  ${padR(area.toString(), 10)}  ${padR(det.timestamp.toString(), 10)}")
-        }
-
-
-        // ── Average detections per processed frame ────────────────────────────
         if (samples.isNotEmpty()) {
             val avgDet = samples.map { it.detectionsCount }.average()
             sb.appendLine("  Average YOLO detections/frame : ${fmtDec(avgDet)}")
@@ -305,6 +334,65 @@ class NavigationReportManager(private val context: Context) {
         sb.appendLine("  Timeout guidance count  : $timeoutGuidanceCount")
         sb.appendLine("  Staircase warnings      : $staircaseWarnings")
         sb.appendLine("  Stair guidance hints    : $stairGuidanceHints")
+        sb.appendLine()
+
+        // ── Rejected detection log ────────────────────────────────────────────
+        val rejected = rejectedDetections.toList()
+        sb.appendLine("── REJECTED DETECTIONS  (${rejected.size} total) ───────────────────────")
+        sb.appendLine("  Area thresholds for reference:")
+        sb.appendLine("    exit=${fmtDec(PROXIMITY_MIN_AREA_EXIT    * 100.0)}%  " +
+                "room=${fmtDec(PROXIMITY_MIN_AREA_ROOMS   * 100.0)}%  " +
+                "opening=${fmtDec(PROXIMITY_MIN_AREA_OPENING * 100.0)}%  " +
+                "stair=${fmtDec(PROXIMITY_MIN_AREA_STAIR   * 100.0)}%")
+        sb.appendLine()
+        if (rejected.isEmpty()) {
+            sb.appendLine("  (none)")
+        } else {
+            // Summary counts by reason
+            val byReason = rejected.groupBy { it.reason }
+            sb.appendLine("  By reason:")
+            RejectionReason.entries.forEach { r ->
+                val n = byReason[r]?.size ?: 0
+                if (n > 0) sb.appendLine("    ${padR(r.name, 14)} : $n")
+            }
+            sb.appendLine()
+
+            // Area distribution per label for TOO_SMALL — the most useful data
+            // for deciding whether to lower a threshold.
+            val tooSmall = byReason[RejectionReason.TOO_SMALL]
+            if (!tooSmall.isNullOrEmpty()) {
+                sb.appendLine("  TOO_SMALL — area% stats per label  (lower threshold if max is close to it):")
+                tooSmall.groupBy { it.label }.toSortedMap().forEach { (lbl, hits) ->
+                    val areas = hits.map { it.areaPct }.sorted()
+                    val p50   = areas[(areas.size * 0.50).toInt().coerceAtMost(areas.size - 1)]
+                    sb.appendLine(
+                        "    ${padR(lbl, 24)}  n=${padL(hits.size.toString(), 4)}  " +
+                                "min=${fmtDec(areas.first().toDouble())}  " +
+                                "p50=${fmtDec(p50.toDouble())}  " +
+                                "max=${fmtDec(areas.last().toDouble())}"
+                    )
+                }
+                sb.appendLine()
+            }
+
+            // Chronological full log
+            sb.appendLine("  ${padR("Time", 10)}  ${padR("Label", 22)}  ${padL("Conf",5)}  ${padL("Area%",6)}  Reason")
+            sb.appendLine("  ${"-".repeat(75)}")
+            rejected.forEach { d ->
+                val detail = when (d.reason) {
+                    RejectionReason.OCR_EMPTY ->
+                        if (d.ocrText.isNotEmpty()) "OCR_EMPTY  got=\"${d.ocrText}\"" else "OCR_EMPTY"
+                    else -> d.reason.name
+                }
+                sb.appendLine(
+                    "  ${padR("+${fmtMs(d.elapsedMs)}", 10)}  " +
+                            "${padR(d.label, 22)}  " +
+                            "${padL(fmtDec(d.confidence.toDouble()), 5)}  " +
+                            "${padL(fmtDec(d.areaPct.toDouble()), 6)}  " +
+                            detail
+                )
+            }
+        }
         sb.appendLine()
 
         // ── Fork events ───────────────────────────────────────────────────────
@@ -344,13 +432,12 @@ class NavigationReportManager(private val context: Context) {
     // ─────────────────────────────────────────────────────────────────────────
 
     private fun fmtMs(ms: Long): String {
-        val s = ms / 1000
-        val m = s / 60
+        val s = ms / 1000; val m = s / 60
         return if (m > 0) "${m}m ${s % 60}s" else "${s}s (${ms}ms)"
     }
 
-    private fun fmtDec(d: Double)   = String.format(Locale.US, "%.2f", d)
-    private fun fmtPct(d: Double)   = String.format(Locale.US, "%.1f%%", d)
+    private fun fmtDec(d: Double)       = String.format(Locale.US, "%.2f", d)
+    private fun fmtPct(d: Double)       = String.format(Locale.US, "%.1f%%", d)
     private fun padR(s: String, n: Int) = s.padEnd(n)
     private fun padL(s: String, n: Int) = s.padStart(n)
 
@@ -359,5 +446,14 @@ class NavigationReportManager(private val context: Context) {
         val sorted = values.sorted()
         val idx    = ((pct / 100.0) * (sorted.size - 1)).toInt().coerceIn(0, sorted.size - 1)
         return sorted[idx]
+    }
+
+    companion object {
+        // Mirrored from ViewModel so the report can print them without
+        // needing a reference back to the ViewModel.
+        private const val PROXIMITY_MIN_AREA_EXIT    = 0.001f
+        private const val PROXIMITY_MIN_AREA_ROOMS   = 0.003f
+        private const val PROXIMITY_MIN_AREA_OPENING = 0.04f
+        private const val PROXIMITY_MIN_AREA_STAIR   = 0.08f
     }
 }
