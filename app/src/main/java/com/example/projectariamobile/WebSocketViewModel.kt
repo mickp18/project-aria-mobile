@@ -127,15 +127,19 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     // ── Navigation state ─────────────────────────────────────────────────────
     var destination        : String = ""
     var lastInstruction    : String = ""
+
     var lastInstructionTime: Long   = 0L
     // Tracks whether the last emitted instruction was positive (has a direction
     // or shouldStop). Replaces the old string-matching heuristic in overrideCooldown
     // which broke for instructions whose text contains neither "left", "right" nor
     // "arrived" (e.g. the stair sign with direction=STRAIGHT).
     private var lastInstructionWasPositive = false
+
     private var isStopping          = AtomicBoolean(false)
 
     private var lastSignTime             = 0L
+    private var lastSignActivityTime = 0L
+
     private var lastTimeoutGuidanceTime  = 0L
     private var navigationConfidence     = 1.0f
     private var lastSideDetectionTime    = 0L
@@ -257,7 +261,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             results.detections.forEach { det ->
                 Log.d("YOLO", "${det.category.label} (${det.category.confidence})")
                 reportManager.recordDetection(det.category.label.lowercase(), qualified = false)
-                reportManager.recordYoloDetection(det.category.label, det.category.confidence, det.boundingBox, yoloStart)
+                // reportManager.recordYoloDetection(det.category.label, det.category.confidence, det.boundingBox, yoloStart)
                 saveBitmapToGallery(application, bitmap, "YOLO_${det.category.label}_${System.currentTimeMillis()}.jpg")
             }
 
@@ -510,6 +514,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             )
 
             if (!isSignPossibleTarget(label)) continue
+            lastSignActivityTime = SystemClock.uptimeMillis()
 
             val isExit = label in setOf("exit_left", "exit_right", "exit")
             val area   = (bbox.width() * bbox.height()) / frameArea
@@ -548,7 +553,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             }
 
             if (requiresText(label) && det.text.isEmpty()) {
-                val direction = getSignPosition()
+                val direction = getSignPosition(bitmap, cropRect)
                 onDisqualified("I can see a sign but can't read it yet. Move a bit closer.")
                 continue
             }
@@ -764,7 +769,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             return
         }
 
-        val gap = now - lastSignTime
+        val gap = now - maxOf(lastSignTime, lastSignActivityTime)
 
         // Each bucket is wider — user stays in it longer before escalating
         val msg = when {
