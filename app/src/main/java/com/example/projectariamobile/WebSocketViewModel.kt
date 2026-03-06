@@ -13,6 +13,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.application
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -52,6 +53,7 @@ sealed class ConnectionStatus {
     object DISCONNECTED : ConnectionStatus()
     object CONNECTING   : ConnectionStatus()
     object CONNECTED    : ConnectionStatus()
+    object WAITING_STREAM_START : ConnectionStatus()
     data class FAILED(val error: String) : ConnectionStatus()
 }
 
@@ -95,6 +97,10 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     private val _isSocketConnected = MutableStateFlow(false)
     val isSocketConnected: StateFlow<Boolean> = _isSocketConnected.asStateFlow()
 
+    // track if the streaming has started
+    private val _isNavigationReady = MutableStateFlow(false)
+    val isNavigationReady: StateFlow<Boolean> = _isNavigationReady.asStateFlow()
+
     private val _connectionStatus =
         MutableStateFlow<ConnectionStatus>(ConnectionStatus.DISCONNECTED)
     val connectionStatus: StateFlow<ConnectionStatus> = _connectionStatus.asStateFlow()
@@ -122,6 +128,11 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     var destination        : String = ""
     var lastInstruction    : String = ""
     var lastInstructionTime: Long   = 0L
+    // Tracks whether the last emitted instruction was positive (has a direction
+    // or shouldStop). Replaces the old string-matching heuristic in overrideCooldown
+    // which broke for instructions whose text contains neither "left", "right" nor
+    // "arrived" (e.g. the stair sign with direction=STRAIGHT).
+    private var lastInstructionWasPositive = false
     private var isStopping          = AtomicBoolean(false)
 
     private var lastSignTime             = 0L
@@ -175,8 +186,14 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                 _messages.value = "New Message: $message"
                 try {
                     val json = JSONObject(message)
+                    if (json.optString("type") == "STREAM_STARTED"){
+                        _isNavigationReady.value = true
+                        _connectionStatus.value = ConnectionStatus.CONNECTED
+                        Log.d("Socket", "Navigation is now ready.")
+                    }
                     if (json.optString("type") == "STATUS_UPDATE") {
                         val payload = json.getJSONObject("payload")
+
                         if (payload.optString("status") == "stopped") {
                             _isSocketConnected.value = false
                             _connectionStatus.value  = ConnectionStatus.DISCONNECTED
@@ -208,7 +225,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
 
             override fun onOpen() {
                 _isSocketConnected.value = true
-                _connectionStatus.value  = ConnectionStatus.CONNECTED
+                _connectionStatus.value  = ConnectionStatus.WAITING_STREAM_START
                 frameCount = 0; droppedFrames = 0; totalFrames = 0
                 lastFrameTime = 0L; firstFrameTime = 0L
                 lastStatsTime = SystemClock.uptimeMillis()
@@ -240,6 +257,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             results.detections.forEach { det ->
                 Log.d("YOLO", "${det.category.label} (${det.category.confidence})")
                 reportManager.recordDetection(det.category.label.lowercase(), qualified = false)
+                reportManager.recordYoloDetection(det.category.label, det.category.confidence, det.boundingBox, yoloStart)
                 saveBitmapToGallery(application, bitmap, "YOLO_${det.category.label}_${System.currentTimeMillis()}.jpg")
             }
 
@@ -408,9 +426,10 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     private suspend fun emitForkHint(message: String, direction: Direction?) {
         val now = SystemClock.uptimeMillis()
         if (now - lastForkInstructionTime < FORK_HINT_COOLDOWN) return
-        lastForkInstructionTime = now
-        lastInstruction         = message
-        lastInstructionTime     = now
+        lastForkInstructionTime    = now
+        lastInstruction            = message
+        lastInstructionTime        = now
+        lastInstructionWasPositive = direction != null
         reportManager.recordInstruction("[FORK] $message")
         _navigationEvents.emit(NavigationEvent.Speak(message))
         direction?.let { navTracker.startTrackingCompliance(it) }
@@ -448,7 +467,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         val closestStair = detections.maxByOrNull {
             it.boundingBox.width() * it.boundingBox.height()
         } ?: return
-
+        Log.d("staircase", "closest: ${closestStair.category.label}")
         val area      = (closestStair.boundingBox.width() * closestStair.boundingBox.height()) / frameArea
         val direction = openingToDirection(closestStair.boundingBox, bitmap)
 
@@ -529,6 +548,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             }
 
             if (requiresText(label) && det.text.isEmpty()) {
+                val direction = getSignPosition()
                 onDisqualified("I can see a sign but can't read it yet. Move a bit closer.")
                 continue
             }
@@ -607,7 +627,10 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             "exit" -> if (isExitSearch) Instruction(
                 text       = "Exit reached.",
                 shouldStop = true
-            ) else null
+            ) else Instruction(
+                text      = "Go back, exit in front.",
+                direction = Direction.TURN_AROUND
+            )
 
             "stair_sign" -> when {
                 isExitSearch -> null
@@ -630,28 +653,48 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
 
     // ─────────────────────────────────────────────────────────────────────────
     // emitIfAllowed
+    //
+    // FIX: replaced the old overrideCooldown string-matching heuristic with an
+    // explicit lastInstructionWasPositive boolean.
+    //
+    // Old code:
+    //   val lastWasNeg = !lastInstruction.contains("arrived") &&
+    //                    !lastInstruction.contains("left") &&
+    //                    !lastInstruction.contains("right")
+    //   val overrideCooldown = isPositive && lastWasNeg && ...
+    //
+    // This broke for the stair_sign instruction ("Your destination is on another
+    // floor...") which has direction=STRAIGHT so isPositive=true, but its text
+    // contains none of the three trigger words so lastWasNeg was always true.
+    // The result: overrideCooldown fired on every frame while the sign was in
+    // view, completely bypassing SPEECH_COOLDOWN and repeating the instruction
+    // 10+ times per second.
     // ─────────────────────────────────────────────────────────────────────────
 
     private fun emitIfAllowed(instruction: Instruction) {
         if (destination.isEmpty() || isStopping.get()) return
 
-        val now           = SystemClock.uptimeMillis()
-        val tooRecent     = (now - lastInstructionTime) < SPEECH_COOLDOWN
-        val sameText      = lastInstruction == instruction.text
-        val notOldYet     = (now - lastInstructionTime) < OLD_SIGN_COOLDOWN
-        val isPositive    = instruction.shouldStop || instruction.direction != null
-        val lastWasNeg    = !lastInstruction.contains("arrived") &&
-                !lastInstruction.contains("left") &&
-                !lastInstruction.contains("right")
-        val overrideCooldown = isPositive && lastWasNeg && (now - lastInstructionTime) < 2_000L
+        val now        = SystemClock.uptimeMillis()
+        val tooRecent  = (now - lastInstructionTime) < SPEECH_COOLDOWN
+        val sameText   = lastInstruction == instruction.text
+        val notOldYet  = (now - lastInstructionTime) < OLD_SIGN_COOLDOWN
+        val isPositive = instruction.shouldStop || instruction.direction != null
+
+        // Allow a positive instruction to immediately follow a negative one only
+        // when they arrive within 2 s of each other — the sign gave a bad OCR read
+        // on one frame and a good one on the next. Guard: the previous instruction
+        // must have been negative, so a positive cannot bypass its own cooldown.
+        val overrideCooldown = isPositive && !lastInstructionWasPositive &&
+                (now - lastInstructionTime) < 2_000L
 
         if (!overrideCooldown && (tooRecent || (sameText && notOldYet))) {
             Log.d("SpeechGate", "Blocked — tooRecent=$tooRecent same=$sameText notOldYet=$notOldYet")
             return
         }
 
-        lastInstruction     = instruction.text
-        lastInstructionTime = now
+        lastInstruction            = instruction.text
+        lastInstructionTime        = now
+        lastInstructionWasPositive = isPositive
         reportManager.recordInstruction(instruction.text)
         Log.d("SpeechGate", "Emitting: \"${instruction.text}\"  dir=${instruction.direction}")
 
@@ -666,10 +709,11 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
 
             if (instruction.shouldStop) {
                 isStopping.set(true)
-                lastInstruction     = ""
-                lastInstructionTime = 0L
-                lookingForStairs    = false
-                forkState           = ForkState.None
+                lastInstruction            = ""
+                lastInstructionTime        = 0L
+                lastInstructionWasPositive = false
+                lookingForStairs           = false
+                forkState                  = ForkState.None
                 navTracker.resetDetectionHistory()
                 _navigationEvents.emit(NavigationEvent.StopNavigation)
                 // Auto-save report on arrival
@@ -709,9 +753,11 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     // =========================================================================
     //  TIMEOUT GUIDANCE
     // =========================================================================
+
     private fun checkForTimeout() {
         val now = SystemClock.uptimeMillis()
         if (now - lastTimeoutGuidanceTime < 2_000L) return
+        if (forkState !is ForkState.None) return
 
         if (lastSignTime == 0L && now > 5_000L) {
             giveTimeoutGuidance("Looking for signs to $destination. Please move forward slowly.", now)
@@ -739,9 +785,10 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     private fun giveTimeoutGuidance(message: String, now: Long) {
         if (message == lastInstruction) return
         if (now - lastInstructionTime < SPEECH_COOLDOWN) return
-        lastInstruction         = message
-        lastInstructionTime     = now
-        lastTimeoutGuidanceTime = now
+        lastInstruction            = message
+        lastInstructionTime        = now
+        lastInstructionWasPositive = false
+        lastTimeoutGuidanceTime    = now
         reportManager.recordTimeoutGuidance()
         reportManager.recordInstruction("[TIMEOUT] $message")
         viewModelScope.launch { _navigationEvents.emit(NavigationEvent.Speak(message)) }
@@ -751,10 +798,6 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     //  REPORT
     // =========================================================================
 
-    /**
-     * Called by MainActivity's stop button (manual stop) or internally on arrival.
-     * Writes the report on an IO thread and emits [NavigationEvent.ReportReady].
-     */
     fun saveReport(reason: StopReason = StopReason.MANUAL_STOP) {
         if (destination.isEmpty()) return
         viewModelScope.launch(Dispatchers.IO) {
@@ -813,6 +856,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         webSocketClient.setSocketUrl("ws://192.168.1.2:8080")
         webSocketClient.connect()
         webSocketClient.sendMessage("start")
+
     }
 
     fun disconnect() {
@@ -823,12 +867,19 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun startNavigation(dest: String) {
-        destination         = dest
-        lastInstruction     = ""
-        lastInstructionTime = 0L
-        lastSignTime        = 0L
-        lookingForStairs    = false
-        forkState           = ForkState.None
+        if (!_isNavigationReady.value) {
+            Log.w("Nav", "Cannot start navigation: Streaming not ready.")
+            return
+        }
+
+        destination                = dest
+        lastInstruction            = ""
+        lastInstructionTime        = 0L
+        lastInstructionWasPositive = false
+        lastSignTime               = 0L
+        lastTimeoutMessage         = ""
+        lookingForStairs           = false
+        forkState                  = ForkState.None
         isStopping.set(false)
         reportManager.startSession(dest)   // ← begin collecting stats
         navTracker.resetDetectionHistory()
