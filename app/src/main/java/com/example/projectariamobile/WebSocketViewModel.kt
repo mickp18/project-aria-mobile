@@ -512,17 +512,24 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                 bbox.left.toInt(), bbox.top.toInt(),
                 bbox.right.toInt(), bbox.bottom.toInt()
             )
+            val bboxArea   = bbox.width() * bbox.height()
 
-            if (!isSignPossibleTarget(label)) continue
+
+            if (!isSignPossibleTarget(label)) {
+                // exit_left / exit_right when not exit-searching — still silent rejections
+                reportManager.recordRejectedDetection(label, confidence, bboxArea, frameArea, RejectionReason.NOT_TARGET)
+                continue
+            }
             lastSignActivityTime = SystemClock.uptimeMillis()
 
             val isExit = label in setOf("exit_left", "exit_right", "exit")
-            val area   = (bbox.width() * bbox.height()) / frameArea
+            val area   = bboxArea / frameArea
 
             if ((area < PROXIMITY_MIN_AREA_EXIT && isExit) ||
                 (area < PROXIMITY_MIN_AREA_ROOMS && !isExit)
             ) {
                 Log.d("Qualify", "$label too small (${String.format("%.3f", area)})")
+                reportManager.recordRejectedDetection(label, confidence, bboxArea, frameArea, RejectionReason.TOO_SMALL)
                 onDisqualified("There's a sign ahead but you're too far. Move closer to read it.")
                 continue
             }
@@ -530,6 +537,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             if (confidence < DISTORTION_CONF &&
                 DistortionChecker.isSignDistorted(bitmap, cropRect)
             ) {
+                reportManager.recordRejectedDetection(label, confidence, bboxArea, frameArea, RejectionReason.DISTORTED)
                 val side = getSignPosition(bitmap, cropRect)
                 val hint = if (side.isNotEmpty())
                     "There's a $label sign on your $side. Turn to face it for a better reading."
@@ -546,6 +554,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
 
             val det = Detection(label = label, confidence = confidence, bbox = bbox)
             if (requiresText(label)) {
+                reportManager.recordRejectedDetection(label, confidence, bboxArea, frameArea, RejectionReason.OCR_EMPTY)
                 val t       = SystemClock.uptimeMillis()
                 val ocrText = textRecognizer.recognizeTextInBoundingBox(bitmap, cropRect, label)
                 Log.i("OCR", "$label → \"$ocrText\" in ${SystemClock.uptimeMillis() - t}ms")
@@ -554,7 +563,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
 
             if (requiresText(label) && det.text.isEmpty()) {
                 val direction = getSignPosition(bitmap, cropRect)
-                onDisqualified("I can see a sign but can't read it yet. Move a bit closer.")
+                onDisqualified("I can see a sign $direction but can't read it yet. Move a bit closer.")
                 continue
             }
 
@@ -819,8 +828,11 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         label in setOf("room", "room_direction_left", "room_direction_right", "stair_sign")
 
     private fun isSignPossibleTarget(label: String): Boolean {
-        val isExitSign = label in setOf("exit_left", "exit_right", "exit")
-        return if (destination.lowercase() == "exit") isExitSign else !isExitSign
+        return when {
+            destination.lowercase() == "exit" -> label in setOf("exit_left", "exit_right", "exit")
+            label == "exit"                   -> true   // always let through — warns user they hit an exit
+            else                              -> label !in setOf("exit_left", "exit_right")
+        }
     }
 
     private fun getSignPosition(bitmap: Bitmap, bbox: Rect): String {
