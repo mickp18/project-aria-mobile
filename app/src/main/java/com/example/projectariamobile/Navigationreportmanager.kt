@@ -43,6 +43,13 @@ data class ForkEvent(
     val outcome       : String           // filled in when fork resolves
 )
 
+data class YoloDetection(
+    val label : String,
+    val confidence : Float,
+    val bbox : android.graphics.RectF,
+    val timestamp : Long
+)
+
 // ─────────────────────────────────────────────────────────────────────────────
 // NavigationReportManager
 // ─────────────────────────────────────────────────────────────────────────────
@@ -57,6 +64,7 @@ class NavigationReportManager(private val context: Context) {
     private val detectionCounts = mutableMapOf<String, Int>()   // label → total seen
     private val qualifiedCounts = mutableMapOf<String, Int>()   // label → survived qualification
     private val instructionLog  = mutableListOf<Pair<Long, String>>() // (elapsed ms, text)
+    private val yoloDetections  = mutableListOf<YoloDetection>()
 
     // ── Fork events ──────────────────────────────────────────────────────────
     private val forkEvents = mutableListOf<ForkEvent>()
@@ -87,6 +95,7 @@ class NavigationReportManager(private val context: Context) {
         frameSamples.clear()
         detectionCounts.clear()
         qualifiedCounts.clear()
+        yoloDetections.clear()
         instructionLog.clear()
         forkEvents.clear()
         frameIndex               = 0
@@ -157,6 +166,11 @@ class NavigationReportManager(private val context: Context) {
             val last = forkEvents.last()
             forkEvents[forkEvents.lastIndex] = last.copy(outcome = outcome)
         }
+    }
+
+    fun recordYoloDetection(label: String, confidence: Float, bbox: android.graphics.RectF, timestamp: Long)
+    {
+        yoloDetections.add(YoloDetection(label, confidence, bbox, timestamp))
     }
 
     fun recordStaircaseWarning()  { staircaseWarnings++ }
@@ -269,6 +283,14 @@ class NavigationReportManager(private val context: Context) {
             }
         }
         sb.appendLine()
+
+        // Display all the yolo detections
+        sb.appendLine("── YOLO DETECTIONS ───────────────────────────────────────────")
+        for (det : YoloDetection in yoloDetections){
+            val area = det.bbox.width()*det.bbox.height()
+            sb.appendLine("  ${padR(det.label, 24)}  ${padR(det.confidence.toString(), 10)}  ${padR(area.toString(), 10)}  ${padR(det.timestamp.toString(), 10)}")
+        }
+
 
         // ── Average detections per processed frame ────────────────────────────
         if (samples.isNotEmpty()) {
