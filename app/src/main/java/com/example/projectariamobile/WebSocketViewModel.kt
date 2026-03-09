@@ -177,6 +177,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     private val PROXIMITY_MIN_AREA_STAIR   = 0.08f
     private val DISTORTION_CONF            = 0.65f
     private val TIMEOUT_REPEAT_COOLDOWN    = 30_000L
+    private var pendingDestination: String = ""
 
     // ─────────────────────────────────────────────────────────────────────────
     // init
@@ -190,10 +191,13 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                 _messages.value = "New Message: $message"
                 try {
                     val json = JSONObject(message)
-                    if (json.optString("type") == "STREAM_STARTED"){
+                    if (json.optString("type") == "STREAM_STARTED") {
                         _isNavigationReady.value = true
                         _connectionStatus.value = ConnectionStatus.CONNECTED
                         Log.d("Socket", "Navigation is now ready.")
+                        // If startNavigation() was called before the stream was ready,
+                        // the destination is waiting in pendingDestination — apply it now.
+                        applyPendingNavigation()
                     }
                     if (json.optString("type") == "STATUS_UPDATE") {
                         val payload = json.getJSONObject("payload")
@@ -774,6 +778,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         if (forkState !is ForkState.None) return
 
         if (lastSignTime == 0L && now > 5_000L) {
+            Log.d("TIMEOUT", "loog")
             giveTimeoutGuidance("Looking for signs to $destination. Please move forward slowly.", now)
             return
         }
@@ -884,12 +889,25 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun startNavigation(dest: String) {
+        // Always store the destination — even if the stream isn't ready yet.
+        // When STREAM_STARTED fires, applyPendingNavigation() will pick this up.
+        pendingDestination = dest
+
         if (!_isNavigationReady.value) {
-            Log.w("Nav", "Cannot start navigation: Streaming not ready.")
+            Log.w("Nav", "Cannot start navigation: Streaming not ready. Destination stored: $dest")
             return
         }
 
-        destination                = dest
+        applyPendingNavigation()
+    }
+
+    // Called either immediately from startNavigation (if stream is ready),
+    // or from onMessage when STREAM_STARTED arrives (if startNavigation was called first).
+    private fun applyPendingNavigation() {
+        if (pendingDestination.isEmpty()) return
+
+        destination                = pendingDestination
+        pendingDestination         = ""          // clear so it can't fire twice
         lastInstruction            = ""
         lastInstructionTime        = 0L
         lastInstructionWasPositive = false
@@ -898,8 +916,9 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         lookingForStairs           = false
         forkState                  = ForkState.None
         isStopping.set(false)
-        reportManager.startSession(dest)   // ← begin collecting stats
+        reportManager.startSession(destination)
         navTracker.resetDetectionHistory()
+        Log.d("Nav", "Navigation started for: $destination")
     }
 
     override fun onCleared() {
