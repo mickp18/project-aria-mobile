@@ -45,6 +45,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
     private var isWaitingForConfirmation = false
     private var isVoiceFlowActive = false
 
+//    private val webSocketViewModel: WebSocketViewModel by viewModels()
     private val webSocketViewModel: WebSocketViewModel by viewModels()
 
     private var isAwaitingWakeWord = true
