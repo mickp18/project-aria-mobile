@@ -58,29 +58,6 @@ sealed class ConnectionStatus {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Fork state machine
-// ─────────────────────────────────────────────────────────────────────────────
-
-sealed class ForkState {
-    object None : ForkState()
-
-    data class AtFork(
-        val availableDirections : List<Direction>,
-        val suggestedDirection  : Direction,
-        val remainingDirections : List<Direction>,
-        val detectedAt          : Long = SystemClock.uptimeMillis()
-    ) : ForkState()
-
-    data class Exploring(
-        val suggestedDirection  : Direction,
-        val remainingDirections : List<Direction>,
-        val exploringStarted    : Long = SystemClock.uptimeMillis()
-    ) : ForkState()
-
-    object SuggestBack : ForkState()
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // ViewModel
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -144,12 +121,6 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     private var navigationConfidence     = 1.0f
     private var lastSideDetectionTime    = 0L
 
-    // ── Fork state ───────────────────────────────────────────────────────────
-    private var forkState              : ForkState = ForkState.None
-    private val FORK_EXPLORE_TIMEOUT   = 30_000L
-    private var lastForkInstructionTime = 0L
-    private val FORK_HINT_COOLDOWN     = 8_000L
-
     // ── Staircase ────────────────────────────────────────────────────────────
     private var lastStairWarningTime   = 0L
     private val STAIR_WARNING_COOLDOWN = 10_000L
@@ -172,8 +143,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     private val OLD_SIGN_COOLDOWN          = 10_000L
     private val SIDE_COOLDOWN              = 8_000L
     private val PROXIMITY_MIN_AREA_EXIT    = 0.001f
-    private val PROXIMITY_MIN_AREA_ROOMS   = 0.003f
-    private val PROXIMITY_MIN_AREA_OPENING = 0.04f
+    private val PROXIMITY_MIN_AREA_ROOMS   = 0.001f
     private val PROXIMITY_MIN_AREA_STAIR   = 0.08f
     private val DISTORTION_CONF            = 0.65f
     private val TIMEOUT_REPEAT_COOLDOWN    = 30_000L
@@ -252,11 +222,8 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
 
     private suspend fun processFrame(bytes: ByteArray) {
         val t0     = SystemClock.uptimeMillis()
-        // val rawBitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return
         val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return
 
-        // Correct overexposure before YOLO sees the frame
-        //val bitmap = rawBitmap.correctExposure()
         Log.d("process", "Exposure corrected")
         try {
             // ── YOLO ──────────────────────────────────────────────────────────
@@ -269,8 +236,6 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             results.detections.forEach { det ->
                 Log.d("YOLO", "${det.category.label} (${det.category.confidence})")
                 reportManager.recordDetection(det.category.label.lowercase(), qualified = false)
-                // reportManager.recordYoloDetection(det.category.label, det.category.confidence, det.boundingBox, yoloStart)
-                //saveBitmapToGallery(application, rawBitmap, "YOLO_${det.category.label}_raw_${System.currentTimeMillis()}.jpg")
                 saveBitmapToGallery(application, bitmap, "YOLO_${det.category.label}_${System.currentTimeMillis()}.jpg")
             }
 
@@ -281,17 +246,13 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             }
 
             // ── Split by category ─────────────────────────────────────────────
-            val openingDetections   = results.detections.filter {
-                it.category.label.lowercase() == "opening"
-            }
             val staircaseDetections = results.detections.filter {
                 it.category.label.lowercase() == "staircase"
             }
             val signDetections      = results.detections.filter {
-                it.category.label.lowercase() !in setOf("opening", "staircase")
+                it.category.label.lowercase() != "staircase"
             }
 
-            handleOpenings(openingDetections, bitmap)
             handleStaircaseProximity(staircaseDetections, bitmap)
 
             // ── Sign qualification + OCR ──────────────────────────────────────
@@ -326,145 +287,14 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             if (isSignPossibleTarget(best.label)) {
                 lastSignTime         = SystemClock.uptimeMillis()
                 navigationConfidence = 1.0f
-                if (forkState is ForkState.Exploring) {
-                    reportManager.recordForkOutcome("Resolved — sign found while exploring")
-                    forkState = ForkState.None
-                }
             }
 
         } finally {
-            //if (bitmap !== rawBitmap) bitmap.recycle()
-            //rawBitmap.recycle()
             bitmap.recycle()
             checkForTimeout()
             Log.d("Timing", "Frame in ${SystemClock.uptimeMillis() - t0}ms")
             Log.i("space", "----------------------------------------------")
         }
-    }
-
-    // =========================================================================
-    //  FORK / OPENING LOGIC
-    // =========================================================================
-
-    private suspend fun handleOpenings(
-        detections: List<ObjectDetection>,
-        bitmap    : Bitmap
-    ) {
-        val frameArea     = (bitmap.width * bitmap.height).toFloat()
-        val validOpenings = detections.filter { det ->
-            val b = det.boundingBox
-            (b.width() * b.height()) / frameArea >= PROXIMITY_MIN_AREA_OPENING
-        }
-        val now = SystemClock.uptimeMillis()
-
-        when (val state = forkState) {
-
-            is ForkState.None -> {
-                if (validOpenings.size < 2) return
-
-                val directions = validOpenings
-                    .map { openingToDirection(it.boundingBox, bitmap) }
-                    .distinct()
-                    .sortedBy { it.ordinal }
-
-                if (directions.size < 2) return
-
-                val suggested = directions.first()
-                val remaining = directions.drop(1)
-
-                reportManager.recordForkDetected(directions.map { directionLabel(it) })
-
-                forkState = ForkState.AtFork(
-                    availableDirections  = directions,
-                    suggestedDirection   = suggested,
-                    remainingDirections  = remaining
-                )
-
-                Log.d("Fork", "Fork detected — $directions, suggesting $suggested")
-                emitForkHint(
-                    "There's a fork ahead. Try going ${directionLabel(suggested)} first.",
-                    suggested
-                )
-            }
-
-            is ForkState.AtFork -> {
-                if (now - state.detectedAt > 3_000L) {
-                    forkState = ForkState.Exploring(
-                        suggestedDirection  = state.suggestedDirection,
-                        remainingDirections = state.remainingDirections
-                    )
-                    navTracker.startTrackingCompliance(state.suggestedDirection)
-                    Log.d("Fork", "Exploring toward ${state.suggestedDirection}")
-                }
-            }
-
-            is ForkState.Exploring -> {
-                val elapsed = now - state.exploringStarted
-                if (elapsed < FORK_EXPLORE_TIMEOUT) return
-
-                navTracker.stopTrackingCompliance()
-                Log.d("Fork", "Explore timeout — ${state.suggestedDirection} failed")
-
-                if (state.remainingDirections.isEmpty()) {
-                    reportManager.recordForkOutcome("All directions exhausted — sent user back")
-                    forkState = ForkState.SuggestBack
-                    emitForkHint(
-                        "No luck in any direction at that fork. Go back the way you came and look for other signs.",
-                        direction = null
-                    )
-                } else {
-                    val next   = state.remainingDirections.first()
-                    val newRem = state.remainingDirections.drop(1)
-                    reportManager.recordForkOutcome(
-                        "Direction ${directionLabel(state.suggestedDirection)} failed — trying ${directionLabel(next)}"
-                    )
-                    forkState = ForkState.AtFork(
-                        availableDirections  = listOf(next) + newRem,
-                        suggestedDirection   = next,
-                        remainingDirections  = newRem
-                    )
-                    emitForkHint(
-                        "Nothing found that way. Go back to the fork and try ${directionLabel(next)} instead.",
-                        next
-                    )
-                }
-            }
-
-            is ForkState.SuggestBack -> {
-                if (now - lastForkInstructionTime > FORK_HINT_COOLDOWN * 2) {
-                    emitForkHint("Please retrace your steps and try a different route.", direction = null)
-                }
-            }
-        }
-    }
-
-    private suspend fun emitForkHint(message: String, direction: Direction?) {
-        val now = SystemClock.uptimeMillis()
-        if (now - lastForkInstructionTime < FORK_HINT_COOLDOWN) return
-        lastForkInstructionTime    = now
-        lastInstruction            = message
-        lastInstructionTime        = now
-        lastInstructionWasPositive = direction != null
-        reportManager.recordInstruction("[FORK] $message")
-        _navigationEvents.emit(NavigationEvent.Speak(message))
-        direction?.let { navTracker.startTrackingCompliance(it) }
-    }
-
-    private fun openingToDirection(bbox: android.graphics.RectF, bitmap: Bitmap): Direction {
-        val cx     = (bbox.left + bbox.right) / 2f
-        val frameW = bitmap.width.toFloat()
-        return when {
-            cx < frameW * 0.35f -> Direction.TURN_LEFT
-            cx > frameW * 0.65f -> Direction.TURN_RIGHT
-            else                -> Direction.STRAIGHT
-        }
-    }
-
-    private fun directionLabel(dir: Direction) = when (dir) {
-        Direction.TURN_LEFT  -> "left"
-        Direction.TURN_RIGHT -> "right"
-        Direction.STRAIGHT   -> "straight ahead"
-        else                 -> dir.name.lowercase()
     }
 
     // =========================================================================
@@ -523,12 +353,6 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             val scaleX = bitmap.width.toFloat()  / 800
             val scaleY = bitmap.height.toFloat() / 800
             Log.d("imgsize", "bbox: ${bbox.width()}")
-//            val cropRect = Rect(
-//                (bbox.left  * scaleX).toInt(),
-//                (bbox.top   * scaleY).toInt(),
-//                (bbox.right * scaleX).toInt(),
-//                (bbox.bottom * scaleY).toInt()
-//            )
             val cropRect = Rect(
                 (bbox.left.toInt()),
                 (bbox.top.toInt()),
@@ -568,7 +392,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                 val hint = if (side.isNotEmpty())
                     "There's a $normLabel sign on your $side. Turn to face it for a better reading."
                 else
-                    "There is a $normLabel sign in fron."
+                    "There is a $normLabel sign in front."
 
                 val now = SystemClock.uptimeMillis()
                 if (now - lastSideDetectionTime > SIDE_COOLDOWN) {
@@ -696,19 +520,6 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     //
     // FIX: replaced the old overrideCooldown string-matching heuristic with an
     // explicit lastInstructionWasPositive boolean.
-    //
-    // Old code:
-    //   val lastWasNeg = !lastInstruction.contains("arrived") &&
-    //                    !lastInstruction.contains("left") &&
-    //                    !lastInstruction.contains("right")
-    //   val overrideCooldown = isPositive && lastWasNeg && ...
-    //
-    // This broke for the stair_sign instruction ("Your destination is on another
-    // floor...") which has direction=STRAIGHT so isPositive=true, but its text
-    // contains none of the three trigger words so lastWasNeg was always true.
-    // The result: overrideCooldown fired on every frame while the sign was in
-    // view, completely bypassing SPEECH_COOLDOWN and repeating the instruction
-    // 10+ times per second.
     // ─────────────────────────────────────────────────────────────────────────
 
     private fun emitIfAllowed(instruction: Instruction) {
@@ -753,7 +564,6 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                 lastInstructionTime        = 0L
                 lastInstructionWasPositive = false
                 lookingForStairs           = false
-                forkState                  = ForkState.None
                 navTracker.resetDetectionHistory()
                 _navigationEvents.emit(NavigationEvent.StopNavigation)
                 // Auto-save report on arrival
@@ -797,7 +607,6 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     private fun checkForTimeout() {
         val now = SystemClock.uptimeMillis()
         if (now - lastTimeoutGuidanceTime < 2_000L) return
-        if (forkState !is ForkState.None) return
 
         if (lastSignTime == 0L && now > 5_000L) {
             Log.d("TIMEOUT", "loog")
@@ -851,13 +660,14 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     //  HELPERS
     // =========================================================================
     private fun mapLabel(label: String) = when (label) {
-        "room_direction_left" -> "directions"
+        "room_direction_left"  -> "directions"
         "room_direction_right" -> "directions"
-        "exit_left" -> "exit direction"
-        "exit_right" -> "exit direction"
-        "stair_sign" -> "stair sign"
-        else -> label
+        "exit_left"            -> "exit direction"
+        "exit_right"           -> "exit direction"
+        "stair_sign"           -> "stair sign"
+        else                   -> label
     }
+
     private fun requiresText(label: String) =
         label in setOf("room", "room_direction_left", "room_direction_right", "stair_sign")
 
@@ -867,6 +677,23 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             label == "exit"                   -> true   // always let through — warns user they hit an exit
             else                              -> label !in setOf("exit_left", "exit_right")
         }
+    }
+
+    private fun openingToDirection(bbox: android.graphics.RectF, bitmap: Bitmap): Direction {
+        val cx     = (bbox.left + bbox.right) / 2f
+        val frameW = bitmap.width.toFloat()
+        return when {
+            cx < frameW * 0.35f -> Direction.TURN_LEFT
+            cx > frameW * 0.65f -> Direction.TURN_RIGHT
+            else                -> Direction.STRAIGHT
+        }
+    }
+
+    private fun directionLabel(dir: Direction) = when (dir) {
+        Direction.TURN_LEFT  -> "left"
+        Direction.TURN_RIGHT -> "right"
+        Direction.STRAIGHT   -> "straight ahead"
+        else                 -> dir.name.lowercase()
     }
 
     private fun getSignPosition(bitmap: Bitmap, bbox: Rect): String {
@@ -907,7 +734,6 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         webSocketClient.setSocketUrl("ws://192.168.1.2:8080")
         webSocketClient.connect()
         webSocketClient.sendMessage("start")
-
     }
 
     fun disconnect() {
@@ -943,7 +769,6 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         lastSignTime               = 0L
         lastTimeoutMessage         = ""
         lookingForStairs           = false
-        forkState                  = ForkState.None
         isStopping.set(false)
         reportManager.startSession(destination)
         navTracker.resetDetectionHistory()
