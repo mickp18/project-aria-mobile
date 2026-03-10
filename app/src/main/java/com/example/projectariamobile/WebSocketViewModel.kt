@@ -252,8 +252,11 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
 
     private suspend fun processFrame(bytes: ByteArray) {
         val t0     = SystemClock.uptimeMillis()
-        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return
+        val rawBitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return
 
+        // Correct overexposure before YOLO sees the frame
+        val bitmap = rawBitmap.correctExposure()
+        Log.d("process", "Exposure corrected")
         try {
             // ── YOLO ──────────────────────────────────────────────────────────
             val yoloStart = SystemClock.uptimeMillis()
@@ -266,6 +269,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                 Log.d("YOLO", "${det.category.label} (${det.category.confidence})")
                 reportManager.recordDetection(det.category.label.lowercase(), qualified = false)
                 // reportManager.recordYoloDetection(det.category.label, det.category.confidence, det.boundingBox, yoloStart)
+                saveBitmapToGallery(application, rawBitmap, "YOLO_${det.category.label}_raw_${System.currentTimeMillis()}.jpg")
                 saveBitmapToGallery(application, bitmap, "YOLO_${det.category.label}_${System.currentTimeMillis()}.jpg")
             }
 
@@ -328,7 +332,8 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             }
 
         } finally {
-            bitmap.recycle()
+            if (bitmap !== rawBitmap) bitmap.recycle()
+            rawBitmap.recycle()
             checkForTimeout()
             Log.d("Timing", "Frame in ${SystemClock.uptimeMillis() - t0}ms")
             Log.i("space", "----------------------------------------------")
@@ -512,12 +517,26 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             val label      = r.category.label.lowercase()
             val confidence = r.category.confidence
             val bbox       = r.boundingBox
-            val cropRect   = Rect(
-                bbox.left.toInt(), bbox.top.toInt(),
-                bbox.right.toInt(), bbox.bottom.toInt()
+
+            val scaleX = bitmap.width.toFloat()  / 800
+            val scaleY = bitmap.height.toFloat() / 800
+            Log.d("imgsize", "bbox: ${bbox.width()}")
+//            val cropRect = Rect(
+//                (bbox.left  * scaleX).toInt(),
+//                (bbox.top   * scaleY).toInt(),
+//                (bbox.right * scaleX).toInt(),
+//                (bbox.bottom * scaleY).toInt()
+//            )
+            val cropRect = Rect(
+                (bbox.left.toInt()),
+                (bbox.top.toInt()),
+                (bbox.right.toInt()),
+                (bbox.bottom.toInt())
             )
             val bboxArea   = bbox.width() * bbox.height()
+            Log.d("imgsize", "bitmap; ${bitmap.width}")
 
+            Log.d("imgsize", "rect; ${cropRect.width()}")
 
             if (!isSignPossibleTarget(label)) {
                 // exit_left / exit_right when not exit-searching — still silent rejections
@@ -543,10 +562,11 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             ) {
                 reportManager.recordRejectedDetection(label, confidence, bboxArea, frameArea, RejectionReason.DISTORTED)
                 val side = getSignPosition(bitmap, cropRect)
+                val normLabel = mapLabel(label)
                 val hint = if (side.isNotEmpty())
-                    "There's a $label sign on your $side. Turn to face it for a better reading."
+                    "There's a $normLabel sign on your $side. Turn to face it for a better reading."
                 else
-                    "There is a $label sign."
+                    "There is a $normLabel sign in fron."
 
                 val now = SystemClock.uptimeMillis()
                 if (now - lastSideDetectionTime > SIDE_COOLDOWN) {
@@ -567,7 +587,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
 
             if (requiresText(label) && det.text.isEmpty()) {
                 val direction = getSignPosition(bitmap, cropRect)
-                onDisqualified("I can see a sign $direction but can't read it yet. Move a bit closer.")
+                onDisqualified("I can see a sign on the  $direction but can't read it yet. Move a bit closer.")
                 continue
             }
 
@@ -611,11 +631,11 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             "room_direction_left" -> when {
                 isExitSearch -> null
                 match        -> Instruction(
-                    text      = "Your destination is on the left.",
+                    text      = "$destination is on the left.",
                     direction = Direction.TURN_LEFT
                 )
                 else -> Instruction(
-                    text      = "The destination isn't on the left. Keep walking.",
+                    text      = "$destination isn't on the left. Keep walking.",
                     direction = Direction.STRAIGHT
                 )
             }
@@ -623,11 +643,11 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             "room_direction_right" -> when {
                 isExitSearch -> null
                 match        -> Instruction(
-                    text      = "Your destination is on the right.",
+                    text      = "$destination is on the right.",
                     direction = Direction.TURN_RIGHT
                 )
                 else -> Instruction(
-                    text      = "The destination isn't on the right. Keep walking.",
+                    text      = "$destination isn't on the right. Keep walking.",
                     direction = Direction.STRAIGHT
                 )
             }
@@ -828,7 +848,14 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     // =========================================================================
     //  HELPERS
     // =========================================================================
-
+    private fun mapLabel(label: String) = when (label) {
+        "room_direction_left" -> "directions"
+        "room_direction_right" -> "directions"
+        "exit_left" -> "exit direction"
+        "exit_right" -> "exit direction"
+        "stair_sign" -> "stair sign"
+        else -> label
+    }
     private fun requiresText(label: String) =
         label in setOf("room", "room_direction_left", "room_direction_right", "stair_sign")
 

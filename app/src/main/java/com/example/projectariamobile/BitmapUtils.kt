@@ -2,12 +2,14 @@ package com.example.projectariamobile
 
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
 import android.graphics.Paint
 import android.graphics.Rect
 import android.util.Log
 import androidx.core.graphics.scale
+import kotlin.math.pow
 
 /**
  * Shared extension function to crop a Bitmap safely.
@@ -39,6 +41,54 @@ fun Bitmap.scaleBitmap(factor: Float): Bitmap {
     val scaled = bitmap.scale(width, height)
     Log.d("TextRecognizer", "Scaled to-(Height: ${scaled.height})")
     return scaled
+}
+
+fun Bitmap.correctExposure(): Bitmap {
+    // Sample a grid of pixels to estimate global brightness
+    val sampleSize = 200
+    val stepX = width  / 10
+    val stepY = height / 10
+    var sum = 0f
+    var count = 0
+    for (x in 0 until width  step stepX) {
+        for (y in 0 until height step stepY) {
+            val p = getPixel(x, y)
+            sum += Color.red(p) * 0.299f + Color.green(p) * 0.587f + Color.blue(p) * 0.114f
+            count++
+        }
+    }
+    val meanBrightness = sum / count
+    Log.d("Exposure", "Mean brightness: $meanBrightness")
+
+    // Only correct if genuinely overexposed — don't touch normal frames
+    if (meanBrightness < 160f) return this
+
+    // Gamma < 1.0 compresses highlights, recovers arrow contrast on bright signs
+    val gamma = when {
+        meanBrightness > 210f -> 0.35f   // severely overexposed
+        meanBrightness > 185f -> 0.45f   // moderately overexposed
+        else                  -> 0.60f   // mildly overexposed
+    }
+
+    return applyGammaLut(gamma)
+}
+
+fun Bitmap.applyGammaLut(gamma: Float): Bitmap {
+    val lut = IntArray(256) { i ->
+        (255f * (i / 255f).pow(gamma)).toInt().coerceIn(0, 255)
+    }
+    val result = copy(Bitmap.Config.ARGB_8888, true)
+    val pixels = IntArray(width * height)
+    getPixels(pixels, 0, width, 0, 0, width, height)
+    for (i in pixels.indices) {
+        val a = Color.alpha(pixels[i])
+        val r = lut[Color.red(pixels[i])]
+        val g = lut[Color.green(pixels[i])]
+        val b = lut[Color.blue(pixels[i])]
+        pixels[i] = Color.argb(a, r, g, b)
+    }
+    result.setPixels(pixels, 0, width, 0, 0, width, height)
+    return result
 }
 
 /**
@@ -84,3 +134,4 @@ fun Bitmap.binarizeBitmap(): Bitmap {
 
     return dest
 }
+

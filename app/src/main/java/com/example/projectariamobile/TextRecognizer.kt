@@ -50,20 +50,25 @@ class TextRecognitionProcessor(private val context: Context) {
 
             val validCropRect = validateAndClampBoundingBox(originalBitmap, boundingBox)
             croppedBitmap = originalBitmap.crop( validCropRect)
-
+            // store cropped bitmap
+            saveBitmapToGallery(context, croppedBitmap, fileName = "CROP_${System.currentTimeMillis()}.jpg", folderName = "OCR_Test_Crops")
             // scale bitmap if too small
-            scaledBitmap = if (croppedBitmap.height < 100 || croppedBitmap.width < 100) {
-                Log.d("TextRecognizer", "Upscaling image (Height: ${croppedBitmap.height})")
-                croppedBitmap.scaleBitmap(5.0f)
-            } else {
-                // No scaling needed, just use the cropped one
-                croppedBitmap
+            val targetMinSize = 100
+            val scaleNeeded = maxOf(
+                if (croppedBitmap.width  < targetMinSize) targetMinSize.toFloat() / croppedBitmap.width  else 1f,
+                if (croppedBitmap.height < targetMinSize) targetMinSize.toFloat() / croppedBitmap.height else 1f
+            )
+            scaledBitmap = if (scaleNeeded > 1f) croppedBitmap.scaleBitmap(scaleNeeded) else croppedBitmap
+            // In recognizeTextInBoundingBox, after cropping:
+            if (croppedBitmap.width < 10 || croppedBitmap.height < 10) {
+                Log.w("TextRecognizer", "Crop too small to be a real sign: ${croppedBitmap.width}x${croppedBitmap.height}, skipping")
+                return null
             }
-
-            binarizedBitmap = scaledBitmap.binarizeBitmap()
+            // binarizedBitmap = scaledBitmap.binarizeBitmap()
 
             // Run OCR directly on the crop
-            val mlKitTextResult = performOCR(binarizedBitmap)
+//            val mlKitTextResult = performOCR(binarizedBitmap)
+            val mlKitTextResult = performOCR(croppedBitmap)
 
             if (mlKitTextResult == null || mlKitTextResult.text.isBlank()) {
                 Log.d("TextRecognizer", "No text found in crop.")
