@@ -252,10 +252,11 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
 
     private suspend fun processFrame(bytes: ByteArray) {
         val t0     = SystemClock.uptimeMillis()
-        val rawBitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return
+        // val rawBitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return
+        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return
 
         // Correct overexposure before YOLO sees the frame
-        val bitmap = rawBitmap.correctExposure()
+        //val bitmap = rawBitmap.correctExposure()
         Log.d("process", "Exposure corrected")
         try {
             // ── YOLO ──────────────────────────────────────────────────────────
@@ -269,7 +270,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                 Log.d("YOLO", "${det.category.label} (${det.category.confidence})")
                 reportManager.recordDetection(det.category.label.lowercase(), qualified = false)
                 // reportManager.recordYoloDetection(det.category.label, det.category.confidence, det.boundingBox, yoloStart)
-                saveBitmapToGallery(application, rawBitmap, "YOLO_${det.category.label}_raw_${System.currentTimeMillis()}.jpg")
+                //saveBitmapToGallery(application, rawBitmap, "YOLO_${det.category.label}_raw_${System.currentTimeMillis()}.jpg")
                 saveBitmapToGallery(application, bitmap, "YOLO_${det.category.label}_${System.currentTimeMillis()}.jpg")
             }
 
@@ -332,8 +333,9 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             }
 
         } finally {
-            if (bitmap !== rawBitmap) bitmap.recycle()
-            rawBitmap.recycle()
+            //if (bitmap !== rawBitmap) bitmap.recycle()
+            //rawBitmap.recycle()
+            bitmap.recycle()
             checkForTimeout()
             Log.d("Timing", "Frame in ${SystemClock.uptimeMillis() - t0}ms")
             Log.i("space", "----------------------------------------------")
