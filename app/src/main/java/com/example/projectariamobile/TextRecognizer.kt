@@ -64,11 +64,16 @@ class TextRecognitionProcessor(private val context: Context) {
                 Log.w("TextRecognizer", "Crop too small to be a real sign: ${croppedBitmap.width}x${croppedBitmap.height}, skipping")
                 return null
             }
-            // binarizedBitmap = scaledBitmap.binarizeBitmap()
-
+            binarizedBitmap = scaledBitmap.binarizeBitmap()
+            saveBitmapToGallery(
+                context,
+                binarizedBitmap, // Saving the drawn-over crop
+                fileName = "CROP_ANNOTATED_binarized_${detectionClass}_${System.currentTimeMillis()}.jpg",
+                folderName = "OCR_Test_Crops"
+            )
             // Run OCR directly on the crop
-//            val mlKitTextResult = performOCR(binarizedBitmap)
-            val mlKitTextResult = performOCR(croppedBitmap)
+           //   val mlKitTextResult = performOCR(binarizedBitmap)
+           val mlKitTextResult = performOCR(croppedBitmap)
 
             if (mlKitTextResult == null || mlKitTextResult.text.isBlank()) {
                 Log.d("TextRecognizer", "No text found in crop.")

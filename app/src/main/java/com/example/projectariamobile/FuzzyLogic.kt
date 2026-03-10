@@ -27,9 +27,9 @@ object FuzzyLogic {
      * Words that change the meaning of the target room.
      * If the target is found but preceded by these, the match is rejected.
      */
-    private val EXCLUDED_MODIFIERS = setOf(
-        "studio", "stuudio", "salu", "sss", "study", "stuio", "aule", "sale"
-    )
+//    private val EXCLUDED_MODIFIERS = setOf(
+//        "studio", "stuudio", "salu", "sss", "study", "stuio", "aule", "sale"
+//    )f
 
     fun isMatch(ocrText: String, target: String): Boolean {
         // Tokenize into distinct words to respect boundaries
@@ -65,11 +65,11 @@ object FuzzyLogic {
             if (isExactMatch || totalCost <= threshold) {
 
                 // 3. Contextual filtering: Ignore if preceded by an excluded modifier
-                val previousWord = if (i > 0) ocrTokens[i - 1] else ""
+//                val previousWord = if (i > 0) ocrTokens[i - 1] else ""
 
-                if (EXCLUDED_MODIFIERS.contains(previousWord)) {
-                    continue // Skip this match; it's a Studio/Lab, not the base room!
-                }
+//                if (EXCLUDED_MODIFIERS.contains(previousWord)) {
+//                    continue // Skip this match; it's a Studio/Lab, not the base room!
+//                }
 
                 return true // Valid Match found!
             }
@@ -92,7 +92,7 @@ object FuzzyLogic {
         val rhsLen = rhs.length
 
         var cost = DoubleArray(lhsLen + 1) { it.toDouble() }
-        var newCost = DoubleArray(lhsLen + 1) { 0.0 }
+        var newCost = DoubleArray(lhsLen + 1)
 
         for (j in 1..rhsLen) {
             newCost[0] = j.toDouble()

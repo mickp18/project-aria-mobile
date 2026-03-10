@@ -28,6 +28,10 @@ import java.util.concurrent.atomic.AtomicBoolean
 // Data types
 // ─────────────────────────────────────────────────────────────────────────────
 
+enum class DestinationType { ROOM, STUDY_ROOM, EXIT, FLOOR }
+private var destinationType: DestinationType = DestinationType.ROOM
+
+
 data class Detection(
     var label     : String                       = "",
     var text      : String                       = "",
@@ -430,7 +434,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     private fun pickBest(qualified: List<Detection>): Detection? =
         qualified.maxWithOrNull(
             compareBy(
-                { if (FuzzyLogic.isMatch(it.text, destination)) 1 else 0 },
+                { if (isDestinationMatch(it.text)) 1 else 0 },
                 { it.confidence },
                 { it.bbox.width() * it.bbox.height() }
             ))
@@ -441,7 +445,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
 
     private fun buildInstruction(det: Detection): Instruction? {
         val isExitSearch = destination.lowercase() == "exit"
-        val match        = FuzzyLogic.isMatch(det.text, destination)
+        val match = isDestinationMatch(det.text)
 
         return when (det.label) {
 
@@ -705,6 +709,26 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    private fun isDestinationMatch(ocrText: String): Boolean {
+        return when (destinationType) {
+            DestinationType.STUDY_ROOM -> {
+                val tokens = ocrText.lowercase().split(Regex("[^a-z0-9]+"))
+                // first check if there is a token referring to study / studio
+                val hasStudyKeyword = tokens.any { token ->
+                    FuzzyLogic.isMatch(token, "studio") || FuzzyLogic.isMatch(token, "study")
+                }
+                hasStudyKeyword && FuzzyLogic.isMatch(ocrText, destination)
+            }
+            DestinationType.ROOM -> {
+                // If OCR sees "studio" or "study", this is a study room sign — reject it
+                // even if the room code matches
+                val isStudyRoomSign = ocrText.contains("studio") || ocrText.contains("study")
+                if (isStudyRoomSign) false else FuzzyLogic.isMatch(ocrText, destination)
+            }
+            else -> FuzzyLogic.isMatch(ocrText, destination)
+        }
+    }
+
     // =========================================================================
     //  STATS
     // =========================================================================
@@ -751,6 +775,13 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         if (!_isNavigationReady.value) {
             Log.w("Nav", "Cannot start navigation: Streaming not ready. Destination stored: $dest")
             return
+        }
+        destinationType = when {
+            dest.lowercase().contains("study room") ||
+                    dest.lowercase().contains("aula studio") -> DestinationType.STUDY_ROOM
+            dest.lowercase() == "exit"               -> DestinationType.EXIT
+            dest.all { it.isDigit() }                -> DestinationType.FLOOR
+            else                                     -> DestinationType.ROOM
         }
 
         applyPendingNavigation()

@@ -184,8 +184,8 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
 
         try {
             val grammar = "[\"yes\", \"no\", \"r one\", \"r two\", \"r three\", \"r four\", " +
-                    "\"r one b\", \"r two b\", \"r three b\", \"one\", \"two\", \"three\", " +
-                    "\"four\", \"b\", \"r four b\", \"study room\", \"study\", \"room\", \"exit\"]"
+                    "\"r one b\", \"r two b\", \"r three b\", " +
+                     "\"r four b\", \"study room\", \"study\", \"room\", \"exit\"]"
             val rec = Recognizer(modelToUse, 16000.0f, grammar)
             speechService = SpeechService(rec, 16000.0f)
             speechService?.startListening(this)
