@@ -17,6 +17,7 @@ import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
 import androidx.core.graphics.scale
 
+
 class TextRecognitionProcessor(private val context: Context) {
 
     private val textRecognizer: TextRecognizer =
@@ -38,7 +39,8 @@ class TextRecognitionProcessor(private val context: Context) {
     suspend fun recognizeTextInBoundingBox(
         originalBitmap: Bitmap,
         boundingBox: Rect,
-        detectionClass: String? = null
+        detectionClass: String? = null,
+        sessionFolder: String = "OCR_Crops"
 
     ): String? {
         return try {
@@ -51,8 +53,9 @@ class TextRecognitionProcessor(private val context: Context) {
             val validCropRect = validateAndClampBoundingBox(originalBitmap, boundingBox)
             croppedBitmap = originalBitmap.crop( validCropRect)
             // store cropped bitmap
-            saveBitmapToGallery(context, croppedBitmap, fileName = "CROP_${System.currentTimeMillis()}.jpg", folderName = "OCR_Test_Crops")
-            // scale bitmap if too small
+            saveBitmapToGallery(context, croppedBitmap,
+                fileName   = "OCR_raw_${detectionClass}_${System.currentTimeMillis()}.jpg",
+                folderName = sessionFolder)            // scale bitmap if too small
             val targetMinSize = 100
             val scaleNeeded = maxOf(
                 if (croppedBitmap.width  < targetMinSize) targetMinSize.toFloat() / croppedBitmap.width  else 1f,
@@ -65,12 +68,9 @@ class TextRecognitionProcessor(private val context: Context) {
                 return null
             }
             binarizedBitmap = scaledBitmap.binarizeBitmap()
-            saveBitmapToGallery(
-                context,
-                binarizedBitmap, // Saving the drawn-over crop
-                fileName = "CROP_ANNOTATED_binarized_${detectionClass}_${System.currentTimeMillis()}.jpg",
-                folderName = "OCR_Test_Crops"
-            )
+            saveBitmapToGallery(context, binarizedBitmap,
+                fileName   = "OCR_binarized_${detectionClass}_${System.currentTimeMillis()}.jpg",
+                folderName = sessionFolder)
             // Run OCR directly on the crop
            //   val mlKitTextResult = performOCR(binarizedBitmap)
            val mlKitTextResult = performOCR(croppedBitmap)
@@ -89,12 +89,9 @@ class TextRecognitionProcessor(private val context: Context) {
             // Save the ANNOTATED CROP
             val className = detectionClass ?: "unknown"
             // Ensure saveBitmapToGallery is defined in your project
-            val saved = saveBitmapToGallery(
-                context,
-                annotatedCrop, // Saving the drawn-over crop
-                fileName = "CROP_ANNOTATED_${className}_${System.currentTimeMillis()}.jpg",
-                folderName = "OCR_Test_Crops"
-            )
+            val saved = saveBitmapToGallery(context, annotatedCrop,
+                fileName   = "OCR_annotated_${className}_${System.currentTimeMillis()}.jpg",
+                folderName = sessionFolder)
 
             if (saved) {
                 Log.i("TextRecognizer", "Annotated crop saved: $className")

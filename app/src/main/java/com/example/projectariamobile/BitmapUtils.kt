@@ -135,3 +135,43 @@ fun Bitmap.binarizeBitmap(): Bitmap {
     return dest
 }
 
+fun Bitmap.drawYoloBbox(det: ObjectDetection): Bitmap {
+    val source = this
+    val out    = source.copy(android.graphics.Bitmap.Config.ARGB_8888, true)
+    val canvas = android.graphics.Canvas(out)
+
+    val boxPaint = android.graphics.Paint().apply {
+        color       = android.graphics.Color.RED
+        style       = android.graphics.Paint.Style.STROKE
+        strokeWidth = 4f
+    }
+    val textPaint = android.graphics.Paint().apply {
+        color    = android.graphics.Color.RED
+        textSize = 36f
+        typeface = android.graphics.Typeface.DEFAULT_BOLD
+        style    = android.graphics.Paint.Style.FILL
+    }
+    val bgPaint = android.graphics.Paint().apply {
+        color = android.graphics.Color.argb(160, 0, 0, 0)
+        style = android.graphics.Paint.Style.FILL
+    }
+
+    val box   = det.boundingBox
+    val label = "${det.category.label} ${"%.2f".format(det.category.confidence)}"
+
+    canvas.drawRect(box, boxPaint)
+
+    // Draw label background then text
+    val textBounds = android.graphics.Rect()
+    textPaint.getTextBounds(label, 0, label.length, textBounds)
+    val labelY = if (box.top > textBounds.height() + 8f) box.top else box.bottom + textBounds.height() + 8f
+    canvas.drawRect(
+        box.left, labelY - textBounds.height() - 8f,
+        box.left + textBounds.width() + 8f, labelY + 4f,
+        bgPaint
+    )
+    canvas.drawText(label, box.left + 4f, labelY, textPaint)
+
+    return out
+}
+

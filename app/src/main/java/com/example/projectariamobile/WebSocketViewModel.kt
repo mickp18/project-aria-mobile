@@ -31,6 +31,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 enum class DestinationType { ROOM, STUDY_ROOM, EXIT, FLOOR }
 private var destinationType: DestinationType = DestinationType.ROOM
 
+private var sessionImageFolder: String = ""
 
 data class Detection(
     var label     : String                       = "",
@@ -237,10 +238,21 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             Log.i("YOLO", "${results.detections.size} detections in ${yoloMs}ms")
 
             // Record all raw detections
+//            results.detections.forEach { det ->
+//                Log.d("YOLO", "${det.category.label} (${det.category.confidence})")
+//                reportManager.recordDetection(det.category.label.lowercase(), qualified = false)
+//                saveBitmapToGallery(application, bitmap, "YOLO_${det.category.label}_${System.currentTimeMillis()}.jpg")
+//            }
             results.detections.forEach { det ->
                 Log.d("YOLO", "${det.category.label} (${det.category.confidence})")
                 reportManager.recordDetection(det.category.label.lowercase(), qualified = false)
-                saveBitmapToGallery(application, bitmap, "YOLO_${det.category.label}_${System.currentTimeMillis()}.jpg")
+                val annotated = bitmap.drawYoloBbox(det)
+                saveBitmapToGallery(
+                    application, annotated,
+                    fileName   = "YOLO_${det.category.label}_${System.currentTimeMillis()}.jpg",
+                    folderName = sessionImageFolder
+                )
+                annotated.recycle()
             }
 
             if (results.detections.isEmpty()) {
@@ -410,7 +422,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             if (requiresText(label)) {
                 reportManager.recordRejectedDetection(label, confidence, bboxArea, frameArea, RejectionReason.OCR_EMPTY)
                 val t       = SystemClock.uptimeMillis()
-                val ocrText = textRecognizer.recognizeTextInBoundingBox(bitmap, cropRect, label)
+                val ocrText = textRecognizer.recognizeTextInBoundingBox(bitmap, cropRect, label, sessionImageFolder)
                 Log.i("OCR", "$label → \"$ocrText\" in ${SystemClock.uptimeMillis() - t}ms")
                 det.text = ocrText?.lowercase() ?: ""
             }
@@ -801,7 +813,12 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         lastTimeoutMessage         = ""
         lookingForStairs           = false
         isStopping.set(false)
+
+        // -- LOGGING --//
         reportManager.startSession(destination)
+        sessionImageFolder = "Nav_${destination}_${
+            java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date())
+        }"
         navTracker.resetDetectionHistory()
         Log.d("Nav", "Navigation started for: $destination")
     }
