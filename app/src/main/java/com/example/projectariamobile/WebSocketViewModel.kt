@@ -420,11 +420,31 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
 
             val det = Detection(label = label, confidence = confidence, bbox = bbox)
             if (requiresText(label)) {
-                reportManager.recordRejectedDetection(label, confidence, bboxArea, frameArea, RejectionReason.OCR_EMPTY)
                 val t       = SystemClock.uptimeMillis()
                 val ocrText = textRecognizer.recognizeTextInBoundingBox(bitmap, cropRect, label, sessionImageFolder)
-                Log.i("OCR", "$label → \"$ocrText\" in ${SystemClock.uptimeMillis() - t}ms")
-                det.text = ocrText?.lowercase() ?: ""
+                val ocrMs   = SystemClock.uptimeMillis() - t
+                val raw     = ocrText?.lowercase() ?: ""
+                val matched = isDestinationMatch(raw)
+
+                Log.i("OCR", "$label → \"$raw\" matched=$matched in ${ocrMs}ms")
+
+                // Record every OCR call with its full outcome
+                reportManager.recordOcrResult(
+                    label       = label,
+                    rawOcrText  = raw,
+                    matchedDest = matched,
+                    ocrMs       = ocrMs,
+                    dest        = destination
+                )
+
+                // Only record OCR_EMPTY rejection if text was actually empty
+                if (raw.isEmpty()) {
+                    reportManager.recordRejectedDetection(
+                        label, confidence, bboxArea, frameArea, RejectionReason.OCR_EMPTY
+                    )
+                }
+
+                det.text = raw
             }
 
             if (requiresText(label) && det.text.isEmpty()) {

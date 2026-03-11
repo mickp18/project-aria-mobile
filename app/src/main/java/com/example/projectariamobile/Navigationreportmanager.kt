@@ -33,15 +33,6 @@ data class FrameSample(
     val droppedBefore  : Int
 )
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Fork event record
-// ─────────────────────────────────────────────────────────────────────────────
-
-data class ForkEvent(
-    val timestampMs : Long,
-    val directions  : List<String>,
-    val outcome     : String
-)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Rejection reason — one value per disqualification gate in qualifyDetections
@@ -66,6 +57,16 @@ data class RejectedDetection(
     val reason     : RejectionReason,
     val ocrText    : String   // non-empty only for OCR_EMPTY (shows what OCR actually returned)
 )
+data class OcrResult(
+    val elapsedMs   : Long,
+    val label       : String,
+    val rawOcrText  : String,   // exactly what ML Kit returned
+    val matchedDest : Boolean,  // did FuzzyLogic.isMatch() return true?
+    val ocrMs       : Long,
+    val destAtTime  : String    // snapshot of destination at time of OCR call
+)
+
+private val ocrResults = CopyOnWriteArrayList<OcrResult>()
 
 // ─────────────────────────────────────────────────────────────────────────────
 // NavigationReportManager
@@ -84,9 +85,6 @@ class NavigationReportManager(private val context: Context) {
 
     // ── Rejection log (thread-safe) ──────────────────────────────────────────
     private val rejectedDetections = CopyOnWriteArrayList<RejectedDetection>()
-
-    // ── Fork events ──────────────────────────────────────────────────────────
-    private val forkEvents = mutableListOf<ForkEvent>()
 
     // ── Frame counters ───────────────────────────────────────────────────────
     private var totalFramesReceived       = 0
@@ -114,7 +112,7 @@ class NavigationReportManager(private val context: Context) {
         qualifiedCounts.clear()
         instructionLog.clear()
         rejectedDetections.clear()
-        forkEvents.clear()
+        ocrResults.clear()
         frameIndex                = 0
         totalFramesReceived       = 0
         totalFramesDropped        = 0
@@ -167,6 +165,25 @@ class NavigationReportManager(private val context: Context) {
         detectionCounts[label] = (detectionCounts[label] ?: 0) + 1
         if (qualified) qualifiedCounts[label] = (qualifiedCounts[label] ?: 0) + 1
     }
+    // ── OCR results log ───────────────────────────────────────────────────────
+    private val ocrResults = CopyOnWriteArrayList<OcrResult>()
+
+    fun recordOcrResult(
+        label       : String,
+        rawOcrText  : String,
+        matchedDest : Boolean,
+        ocrMs       : Long,
+        dest        : String
+    ) {
+        ocrResults.add(OcrResult(
+            elapsedMs   = SystemClock.uptimeMillis() - navigationStartMs,
+            label       = label,
+            rawOcrText  = rawOcrText,
+            matchedDest = matchedDest,
+            ocrMs       = ocrMs,
+            destAtTime  = dest
+        ))
+    }
 
     /**
      * Record a detection that was rejected during qualification.
@@ -206,17 +223,8 @@ class NavigationReportManager(private val context: Context) {
         instructionLog.add(Pair(elapsed, text))
     }
 
-    fun recordForkDetected(directions: List<String>) {
-        val elapsed = SystemClock.uptimeMillis() - navigationStartMs
-        forkEvents.add(ForkEvent(elapsed, directions, outcome = "pending"))
-    }
 
-    fun recordForkOutcome(outcome: String) {
-        if (forkEvents.isNotEmpty()) {
-            val last = forkEvents.last()
-            forkEvents[forkEvents.lastIndex] = last.copy(outcome = outcome)
-        }
-    }
+
 
     fun recordStaircaseWarning()  { staircaseWarnings++ }
     fun recordStairGuidanceHint() { stairGuidanceHints++ }
@@ -336,6 +344,71 @@ class NavigationReportManager(private val context: Context) {
         sb.appendLine("  Stair guidance hints    : $stairGuidanceHints")
         sb.appendLine()
 
+        // ── OCR results ───────────────────────────────────────────────────────────
+        // ── OCR results ───────────────────────────────────────────────────────────
+        val ocr = ocrResults.toList()
+        sb.appendLine("── OCR RESULTS  (${ocr.size} total calls) ──────────────────────────")
+
+        if (ocr.isEmpty()) {
+            sb.appendLine("  (no OCR calls recorded)")
+        } else {
+            val nonEmpty = ocr.filter { it.rawOcrText.isNotEmpty() }
+            val empty    = ocr.filter { it.rawOcrText.isEmpty() }
+            val matched  = nonEmpty.filter { it.matchedDest }
+            val missed   = nonEmpty.filter { !it.matchedDest }
+
+            val nonEmptyRate = if (ocr.isNotEmpty()) nonEmpty.size * 100.0 / ocr.size else 0.0
+            val matchRate    = if (nonEmpty.isNotEmpty()) matched.size * 100.0 / nonEmpty.size else 0.0
+
+            sb.appendLine("  Total OCR calls     : ${ocr.size}")
+            sb.appendLine("  Non-empty results   : ${nonEmpty.size}  (${fmtPct(nonEmptyRate)})")
+            sb.appendLine("  Empty results       : ${empty.size}")
+            sb.appendLine("  Destination matches : ${matched.size}  (${fmtPct(matchRate)} of non-empty)")
+            sb.appendLine("  Non-matches         : ${missed.size}")
+            sb.appendLine()
+
+            // Average latency split by outcome
+            if (nonEmpty.isNotEmpty()) {
+                val avgMatchMs  = if (matched.isNotEmpty()) matched.map { it.ocrMs }.average() else 0.0
+                val avgMissMs   = if (missed.isNotEmpty())  missed.map  { it.ocrMs }.average() else 0.0
+                val avgEmptyMs  = if (empty.isNotEmpty())   empty.map   { it.ocrMs }.average() else 0.0
+                sb.appendLine("  Avg OCR latency by outcome:")
+                sb.appendLine("    Match   : ${fmtDec(avgMatchMs)} ms")
+                sb.appendLine("    No-match: ${fmtDec(avgMissMs)} ms")
+                sb.appendLine("    Empty   : ${fmtDec(avgEmptyMs)} ms")
+                sb.appendLine()
+            }
+
+            // Per-label breakdown
+            sb.appendLine("  Per-label summary:")
+            sb.appendLine("  ${padR("Label", 24)}  ${padL("Calls",5)}  ${padL("NonEmpty",8)}  ${padL("Matched",7)}  ${padL("AvgMs",6)}")
+            sb.appendLine("  ${"-".repeat(60)}")
+            ocr.groupBy { it.label }.toSortedMap().forEach { (lbl, hits) ->
+                val ne  = hits.count { it.rawOcrText.isNotEmpty() }
+                val m   = hits.count { it.matchedDest }
+                val avg = hits.map { it.ocrMs }.average()
+                sb.appendLine("  ${padR(lbl, 24)}  ${padL(hits.size.toString(),5)}  ${padL(ne.toString(),8)}  ${padL(m.toString(),7)}  ${padL(fmtDec(avg),6)}")
+            }
+            sb.appendLine()
+
+            // Non-match log — the most useful part for manual analysis
+            // Shows exactly what OCR returned vs. what was expected
+            if (missed.isNotEmpty()) {
+                sb.appendLine("  NON-MATCH detail (OCR returned text but it didn't match destination):")
+                sb.appendLine("  ${padR("Time", 10)}  ${padR("Label", 22)}  ${padR("Dest", 10)}  Raw OCR text")
+                sb.appendLine("  ${"-".repeat(75)}")
+                missed.forEach { r ->
+                    sb.appendLine(
+                        "  ${padR("+${fmtMs(r.elapsedMs)}", 10)}  " +
+                                "${padR(r.label, 22)}  " +
+                                "${padR(r.destAtTime, 10)}  " +
+                                "\"${r.rawOcrText}\""
+                    )
+                }
+                sb.appendLine()
+            }
+        }
+
         // ── Rejected detection log ────────────────────────────────────────────
         val rejected = rejectedDetections.toList()
         sb.appendLine("── REJECTED DETECTIONS  (${rejected.size} total) ───────────────────────")
@@ -395,19 +468,6 @@ class NavigationReportManager(private val context: Context) {
         }
         sb.appendLine()
 
-        // ── Fork events ───────────────────────────────────────────────────────
-        sb.appendLine("── FORK EVENTS  (${forkEvents.size} total) ──────────────────────────")
-        if (forkEvents.isEmpty()) {
-            sb.appendLine("  No forks encountered.")
-        } else {
-            forkEvents.forEachIndexed { i, ev ->
-                sb.appendLine("  Fork ${i + 1}:")
-                sb.appendLine("    At       : +${fmtMs(ev.timestampMs)}")
-                sb.appendLine("    Dirs     : ${ev.directions.joinToString(", ")}")
-                sb.appendLine("    Outcome  : ${ev.outcome}")
-            }
-        }
-        sb.appendLine()
 
         // ── Instruction timeline ──────────────────────────────────────────────
         sb.appendLine("── INSTRUCTION TIMELINE ────────────────────────────────────")
