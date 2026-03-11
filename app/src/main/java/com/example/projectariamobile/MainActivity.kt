@@ -185,7 +185,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         try {
             val grammar = "[\"yes\", \"no\", \"r one\", \"r two\", \"r three\", \"r four\", " +
                     "\"r one b\", \"r two b\", \"r three b\", " +
-                     "\"r four b\", \"study room\", \"study\", \"room\", \"exit\"]"
+                     "\"r four b\", \"study room r one\", \"study room r two\", \"study\", \"room\", \"exit\"]"
             val rec = Recognizer(modelToUse, 16000.0f, grammar)
             speechService = SpeechService(rec, 16000.0f)
             speechService?.startListening(this)
@@ -264,7 +264,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
 
         confirmationDialog = AlertDialog.Builder(this)
             .setTitle("Confirm Goal")
-            .setMessage("Go to: $goal?")
+            .setMessage("Go to: ${mapSpeechToCommand(goal)}?")
             .setPositiveButton("Yes") { _, _ -> finalizeGoal() }
             .setNegativeButton("No")  { _, _ -> startVoiceCapture() }
             .setOnCancelListener     { resetVoiceFlow() }
@@ -470,6 +470,8 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
             "r two b" -> "r2b"
             "r three b" -> "r3b"
             "r four b"  -> "r4b"
+            "study room r one" -> "study room R1"
+            "study room r two" -> "study room R2"
             else -> text.replace(" ", "")
         }
     }
