@@ -50,7 +50,6 @@ data class Instruction(
 sealed class NavigationEvent {
     data class Speak(val message: String) : NavigationEvent()
     object StopNavigation : NavigationEvent()
-    /** Emitted after report is written; MainActivity uses the path to notify the user. */
     data class ReportReady(val filePath: String) : NavigationEvent()
 }
 
@@ -79,7 +78,6 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     private val _isSocketConnected = MutableStateFlow(false)
     val isSocketConnected: StateFlow<Boolean> = _isSocketConnected.asStateFlow()
 
-    // track if the streaming has started
     private val _isNavigationReady = MutableStateFlow(false)
     val isNavigationReady: StateFlow<Boolean> = _isNavigationReady.asStateFlow()
 
@@ -111,16 +109,12 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     var lastInstruction    : String = ""
 
     var lastInstructionTime: Long   = 0L
-    // Tracks whether the last emitted instruction was positive (has a direction
-    // or shouldStop). Replaces the old string-matching heuristic in overrideCooldown
-    // which broke for instructions whose text contains neither "left", "right" nor
-    // "arrived" (e.g. the stair sign with direction=STRAIGHT).
     private var lastInstructionWasPositive = false
 
     private var isStopping          = AtomicBoolean(false)
 
     private var lastSignTime             = 0L
-    private var lastSignActivityTime = 0L
+    private var lastSignActivityTime     = 0L
 
     private var lastTimeoutGuidanceTime  = 0L
     private var navigationConfidence     = 1.0f
@@ -147,9 +141,12 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     private val SPEECH_COOLDOWN            = 5000L
     private val OLD_SIGN_COOLDOWN          = 10_000L
     private val SIDE_COOLDOWN              = 8_000L
-    private val PROXIMITY_MIN_AREA_EXIT    = 0.001f
+    private val PROXIMITY_MIN_AREA_EXIT    = 0.001f  // exit_left / exit_right arrow signs
     private val PROXIMITY_MIN_AREA_ROOMS   = 0.001f
     private val PROXIMITY_MIN_AREA_STAIR   = 0.08f
+    // door_exit is a full-size door — require it to fill ≥6% of the frame so
+    // a door visible far down the corridor doesn't falsely trigger "Exit reached."
+    private val PROXIMITY_MIN_AREA_DOOR    = 0.06f
     private val DISTORTION_CONF            = 0.65f
     private val TIMEOUT_REPEAT_COOLDOWN    = 30_000L
     private var pendingDestination: String = ""
@@ -170,13 +167,10 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                         _isNavigationReady.value = true
                         _connectionStatus.value = ConnectionStatus.CONNECTED
                         Log.d("Socket", "Navigation is now ready.")
-                        // If startNavigation() was called before the stream was ready,
-                        // the destination is waiting in pendingDestination — apply it now.
                         applyPendingNavigation()
                     }
                     if (json.optString("type") == "STATUS_UPDATE") {
                         val payload = json.getJSONObject("payload")
-
                         if (payload.optString("status") == "stopped") {
                             _isSocketConnected.value = false
                             _connectionStatus.value  = ConnectionStatus.DISCONNECTED
@@ -191,7 +185,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                 frameCount++; totalFrames++
 
                 val dropped = isProcessing.get()
-                reportManager.recordFrameReceived(dropped)   // ← report
+                reportManager.recordFrameReceived(dropped)
 
                 if (dropped) { droppedFrames++; updateStats(); return }
                 if (firstFrameTime == 0L) firstFrameTime = receiveTime
@@ -229,38 +223,45 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         val t0     = SystemClock.uptimeMillis()
         val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return
 
-        Log.d("process", "Exposure corrected")
+        // ── Obtain stable frame ID for this frame ─────────────────────────────
+        // Every image saved and every report entry for this frame will carry this
+        // same tag (e.g. "F00042"), making cross-referencing trivial.
+        val frameId  = reportManager.nextFrameId()
+        val frameTag = reportManager.frameTag(frameId)
+        Log.d("Frame", "[$frameTag] processing")
+
         try {
             // ── YOLO ──────────────────────────────────────────────────────────
             val yoloStart = SystemClock.uptimeMillis()
             val results   = yoloDetector.detect(bitmap, 0)
             val yoloMs    = SystemClock.uptimeMillis() - yoloStart
-            Log.i("YOLO", "${results.detections.size} detections in ${yoloMs}ms")
+            Log.i("YOLO", "[$frameTag] ${results.detections.size} detections in ${yoloMs}ms")
 
-            // Record all raw detections
-//            results.detections.forEach { det ->
-//                Log.d("YOLO", "${det.category.label} (${det.category.confidence})")
-//                reportManager.recordDetection(det.category.label.lowercase(), qualified = false)
-//                saveBitmapToGallery(application, bitmap, "YOLO_${det.category.label}_${System.currentTimeMillis()}.jpg")
-//            }
             results.detections.forEach { det ->
-                Log.d("YOLO", "${det.category.label} (${det.category.confidence})")
+                Log.d("YOLO", "[$frameTag] ${det.category.label} (${det.category.confidence})")
                 reportManager.recordDetection(det.category.label.lowercase(), qualified = false)
                 val annotated = bitmap.drawYoloBbox(det)
                 saveBitmapToGallery(
                     application, annotated,
-                    fileName   = "YOLO_${det.category.label}_${System.currentTimeMillis()}.jpg",
+                    // frameTag prefix makes this image findable from the report
+                    fileName   = "${frameTag}_YOLO_${det.category.label}_${System.currentTimeMillis()}.jpg",
                     folderName = sessionImageFolder
                 )
                 annotated.recycle()
             }
 
             if (results.detections.isEmpty()) {
-                reportManager.recordFrameProcessed(yoloMs, 0L, SystemClock.uptimeMillis() - t0, 0)
+                reportManager.recordFrameProcessed(
+                    frameId         = frameId,
+                    yoloMs          = yoloMs,
+                    ocrMs           = 0L,
+                    totalMs         = SystemClock.uptimeMillis() - t0,
+                    detectionsCount = 0
+                )
                 checkForTimeout()
                 saveBitmapToGallery(
                     application, bitmap,
-                    fileName   = "YOLO_NO_DETECTION_${System.currentTimeMillis()}.jpg",
+                    fileName   = "${frameTag}_YOLO_NO_DETECTION_${System.currentTimeMillis()}.jpg",
                     folderName = sessionImageFolder
                 )
                 return
@@ -270,11 +271,11 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             val staircaseDetections = results.detections.filter {
                 it.category.label.lowercase() == "staircase"
             }
-            val signDetections      = results.detections.filter {
+            val signDetections = results.detections.filter {
                 it.category.label.lowercase() != "staircase"
             }
 
-            handleStaircaseProximity(staircaseDetections, bitmap)
+            handleStaircaseProximity(staircaseDetections, bitmap, frameId)
 
             // ── Sign qualification + OCR ──────────────────────────────────────
             var pendingHint: String? = null
@@ -282,23 +283,43 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
 
             val qualified = if (signDetections.isNotEmpty()) {
                 val ocrStart = SystemClock.uptimeMillis()
-                val q = qualifyDetections(signDetections, bitmap) { hint ->
+                val q = qualifyDetections(signDetections, bitmap, frameId) { hint ->
                     if (pendingHint == null) pendingHint = hint
                 }
                 ocrMs = SystemClock.uptimeMillis() - ocrStart
                 q
             } else emptyList()
 
-            // Record qualified detection counts
             qualified.forEach { reportManager.recordDetection(it.label, qualified = true) }
 
             val totalFrameMs = SystemClock.uptimeMillis() - t0
-            reportManager.recordFrameProcessed(yoloMs, ocrMs, totalFrameMs, results.detections.size)
+            reportManager.recordFrameProcessed(
+                frameId         = frameId,
+                yoloMs          = yoloMs,
+                ocrMs           = ocrMs,
+                totalMs         = totalFrameMs,
+                detectionsCount = results.detections.size
+            )
 
             if (qualified.isEmpty()) {
                 pendingHint?.let { emitIfAllowed(Instruction(it)) }
                 checkForTimeout()
                 return
+            }
+
+            // ── Exit arrival check (runs before pickBest) ─────────────────────
+            // Evaluates door + overhead-sign combination for the EXIT destination.
+            // If it produces an instruction we emit it and skip the normal path.
+            if (destinationType == DestinationType.EXIT) {
+                val exitInstruction = evaluateExitCondition(qualified)
+                if (exitInstruction != null) {
+                    emitIfAllowed(exitInstruction)
+                    lastSignTime = SystemClock.uptimeMillis()
+                    // If it's a stop instruction the coroutine in emitIfAllowed
+                    // handles StopNavigation; we still fall through to finally.
+                    if (exitInstruction.shouldStop) return
+                    // Non-stop exit guidance emitted — still allow arrow signs below
+                }
             }
 
             val best        = pickBest(qualified) ?: run { checkForTimeout(); return }
@@ -313,7 +334,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         } finally {
             bitmap.recycle()
             checkForTimeout()
-            Log.d("Timing", "Frame in ${SystemClock.uptimeMillis() - t0}ms")
+            Log.d("Timing", "[$frameTag] Frame in ${SystemClock.uptimeMillis() - t0}ms")
             Log.i("space", "----------------------------------------------")
         }
     }
@@ -324,7 +345,8 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
 
     private suspend fun handleStaircaseProximity(
         detections: List<ObjectDetection>,
-        bitmap    : Bitmap
+        bitmap    : Bitmap,
+        frameId   : Int      // ← NEW param (reserved for future stair image saves)
     ) {
         if (detections.isEmpty()) return
 
@@ -360,46 +382,66 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     private suspend fun qualifyDetections(
         raw            : List<ObjectDetection>,
         bitmap         : Bitmap,
+        frameId        : Int,    // ← NEW param — threaded to every record call
         onDisqualified : (hint: String) -> Unit
     ): List<Detection> {
 
         val frameArea = (bitmap.width * bitmap.height).toFloat()
         val qualified = mutableListOf<Detection>()
+        val frameTag  = reportManager.frameTag(frameId)
 
         for (r in raw) {
             val label      = r.category.label.lowercase()
             val confidence = r.category.confidence
             val bbox       = r.boundingBox
 
-            val scaleX = bitmap.width.toFloat()  / 800
-            val scaleY = bitmap.height.toFloat() / 800
-            Log.d("imgsize", "bbox: ${bbox.width()}")
+            Log.d("imgsize", "[$frameTag] bbox: ${bbox.width()}")
             val cropRect = Rect(
-                (bbox.left.toInt()),
-                (bbox.top.toInt()),
-                (bbox.right.toInt()),
-                (bbox.bottom.toInt())
+                bbox.left.toInt(),
+                bbox.top.toInt(),
+                bbox.right.toInt(),
+                bbox.bottom.toInt()
             )
-            val bboxArea   = bbox.width() * bbox.height()
-            Log.d("imgsize", "bitmap; ${bitmap.width}")
-
-            Log.d("imgsize", "rect; ${cropRect.width()}")
+            val bboxArea = bbox.width() * bbox.height()
 
             if (!isSignPossibleTarget(label)) {
-                // exit_left / exit_right when not exit-searching — still silent rejections
-                reportManager.recordRejectedDetection(label, confidence, bboxArea, frameArea, RejectionReason.NOT_TARGET)
+                reportManager.recordRejectedDetection(
+                    frameId    = frameId,
+                    label      = label,
+                    confidence = confidence,
+                    bboxArea   = bboxArea,
+                    frameArea  = frameArea,
+                    reason     = RejectionReason.NOT_TARGET
+                )
                 continue
             }
             lastSignActivityTime = SystemClock.uptimeMillis()
 
-            val isExit = label in setOf("exit_left", "exit_right", "exit")
-            val area   = bboxArea / frameArea
+            val isExitArrow = label in setOf("exit_left", "exit_right")
+            val isDoor      = label == "door_exit"
+            val isExitDown  = label == "exit_down"
+            val area        = bboxArea / frameArea
 
-            if ((area < PROXIMITY_MIN_AREA_EXIT && isExit) ||
-                (area < PROXIMITY_MIN_AREA_ROOMS && !isExit)
-            ) {
-                Log.d("Qualify", "$label too small (${String.format("%.3f", area)})")
-                reportManager.recordRejectedDetection(label, confidence, bboxArea, frameArea, RejectionReason.TOO_SMALL)
+            // Per-class area threshold:
+            //   door_exit    → PROXIMITY_MIN_AREA_DOOR  (large physical door, must be close)
+            //   arrow/down   → PROXIMITY_MIN_AREA_EXIT  (small wall/ceiling signs)
+            //   room signs   → PROXIMITY_MIN_AREA_ROOMS
+            val minArea = when {
+                isDoor                      -> PROXIMITY_MIN_AREA_DOOR
+                isExitArrow || isExitDown   -> PROXIMITY_MIN_AREA_EXIT
+                else                        -> PROXIMITY_MIN_AREA_ROOMS
+            }
+
+            if (area < minArea) {
+                Log.d("Qualify", "[$frameTag] $label too small (${String.format("%.3f", area)})")
+                reportManager.recordRejectedDetection(
+                    frameId    = frameId,
+                    label      = label,
+                    confidence = confidence,
+                    bboxArea   = bboxArea,
+                    frameArea  = frameArea,
+                    reason     = RejectionReason.TOO_SMALL
+                )
                 onDisqualified("There's a sign ahead but you're too far. Move closer to read it.")
                 continue
             }
@@ -407,8 +449,15 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             if (confidence < DISTORTION_CONF &&
                 DistortionChecker.isSignDistorted(bitmap, cropRect)
             ) {
-                reportManager.recordRejectedDetection(label, confidence, bboxArea, frameArea, RejectionReason.DISTORTED)
-                val side = getSignPosition(bitmap, cropRect)
+                reportManager.recordRejectedDetection(
+                    frameId    = frameId,
+                    label      = label,
+                    confidence = confidence,
+                    bboxArea   = bboxArea,
+                    frameArea  = frameArea,
+                    reason     = RejectionReason.DISTORTED
+                )
+                val side      = getSignPosition(bitmap, cropRect)
                 val normLabel = mapLabel(label)
                 val hint = if (side.isNotEmpty())
                     "There's a $normLabel sign on your $side. Turn to face it for a better reading."
@@ -424,37 +473,49 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             }
 
             val det = Detection(label = label, confidence = confidence, bbox = bbox)
+
             if (requiresText(label)) {
                 val t       = SystemClock.uptimeMillis()
-                val ocrText = textRecognizer.recognizeTextInBoundingBox(bitmap, cropRect, label, sessionImageFolder)
+                // Pass frameTag so OCR-saved images share the same prefix
+                val ocrText = textRecognizer.recognizeTextInBoundingBox(
+                    bitmap,
+                    cropRect,
+                    label,
+                    sessionImageFolder,
+                    frameTag   // ← NEW arg
+                )
                 val ocrMs   = SystemClock.uptimeMillis() - t
-                val raw     = ocrText?.lowercase() ?: ""
-                val matched = isDestinationMatch(raw)
+                val rawText = ocrText?.lowercase() ?: ""
+                val matched = isDestinationMatch(rawText)
 
-                Log.i("OCR", "$label → \"$raw\" matched=$matched in ${ocrMs}ms")
+                Log.i("OCR", "[$frameTag] $label → \"$rawText\" matched=$matched in ${ocrMs}ms")
 
-                // Record every OCR call with its full outcome
                 reportManager.recordOcrResult(
+                    frameId     = frameId,
                     label       = label,
-                    rawOcrText  = raw,
+                    rawOcrText  = rawText,
                     matchedDest = matched,
                     ocrMs       = ocrMs,
                     dest        = destination
                 )
 
-                // Only record OCR_EMPTY rejection if text was actually empty
-                if (raw.isEmpty()) {
+                if (rawText.isEmpty()) {
                     reportManager.recordRejectedDetection(
-                        label, confidence, bboxArea, frameArea, RejectionReason.OCR_EMPTY
+                        frameId    = frameId,
+                        label      = label,
+                        confidence = confidence,
+                        bboxArea   = bboxArea,
+                        frameArea  = frameArea,
+                        reason     = RejectionReason.OCR_EMPTY
                     )
                 }
 
-                det.text = raw
+                det.text = rawText
             }
 
             if (requiresText(label) && det.text.isEmpty()) {
                 val direction = getSignPosition(bitmap, cropRect)
-                onDisqualified("I can see a sign on the  $direction but can't read it yet. Move a bit closer.")
+                onDisqualified("I can see a sign on the $direction but can't read it yet. Move a bit closer.")
                 continue
             }
 
@@ -481,7 +542,8 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     // ─────────────────────────────────────────────────────────────────────────
 
     private fun buildInstruction(det: Detection): Instruction? {
-        val isExitSearch = destination.lowercase() == "exit"
+        // Use the enum — it is the single source of truth set in startNavigation.
+        val isExitSearch = destinationType == DestinationType.EXIT
         val match = isDestinationMatch(det.text)
 
         return when (det.label) {
@@ -519,6 +581,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                 )
             }
 
+            // Arrow signs — direction hints only, handled here
             "exit_left"  -> if (isExitSearch) Instruction(
                 text      = "The nearest exit is on your left.",
                 direction = Direction.TURN_LEFT
@@ -529,13 +592,9 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                 direction = Direction.TURN_RIGHT
             ) else null
 
-            "exit" -> if (isExitSearch) Instruction(
-                text       = "Exit reached.",
-                shouldStop = true
-            ) else Instruction(
-                text      = "Go back, exit in front.",
-                direction = Direction.TURN_AROUND
-            )
+            // door_exit and exit_down arrival logic is handled by
+            // evaluateExitCondition() before pickBest — they never reach here.
+            "door_exit", "exit_down" -> null
 
             "stair_sign" -> when {
                 isExitSearch -> null
@@ -557,10 +616,40 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // emitIfAllowed
+    // evaluateExitCondition
+    // Called before pickBest when destinationType == EXIT.
+    // Decides arrival / approach based on which exit signs are visible together.
     //
-    // FIX: replaced the old overrideCooldown string-matching heuristic with an
-    // explicit lastInstructionWasPositive boolean.
+    //  door_exit alone (close enough)  → STOP  — door is always present, confirms arrival
+    //  door_exit + exit_down together  → STOP  — belt-and-suspenders confirmation
+    //  exit_down alone                 → GUIDE (straight) — door coming, not visible yet
+    //  nothing relevant here           → null  — fall through to arrow-sign handling
+    // ─────────────────────────────────────────────────────────────────────────
+    private fun evaluateExitCondition(qualified: List<Detection>): Instruction? {
+        val labels = qualified.map { it.label }.toSet()
+        val hasDoor = "door_exit" in labels
+        val hasSign = "exit_down" in labels
+
+        return when {
+            hasDoor ->
+                // Door visible and close enough (threshold already enforced in
+                // qualifyDetections) — exit confirmed regardless of overhead sign
+                Instruction(
+                    text       = "You've reached the exit. You can leave now.",
+                    shouldStop = true
+                )
+            hasSign ->
+                // Overhead sign visible but door not yet in frame — guide forward
+                Instruction(
+                    text      = "Exit is straight ahead. Keep walking.",
+                    direction = Direction.STRAIGHT
+                )
+            else -> null  // only arrow signs present, fall through to pickBest
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // emitIfAllowed
     // ─────────────────────────────────────────────────────────────────────────
 
     private fun emitIfAllowed(instruction: Instruction) {
@@ -572,10 +661,6 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         val notOldYet  = (now - lastInstructionTime) < OLD_SIGN_COOLDOWN
         val isPositive = instruction.shouldStop || instruction.direction != null
 
-        // Allow a positive instruction to immediately follow a negative one only
-        // when they arrive within 2 s of each other — the sign gave a bad OCR read
-        // on one frame and a good one on the next. Guard: the previous instruction
-        // must have been negative, so a positive cannot bypass its own cooldown.
         val overrideCooldown = isPositive && !lastInstructionWasPositive &&
                 (now - lastInstructionTime) < 2_000L
 
@@ -590,13 +675,23 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         reportManager.recordInstruction(instruction.text)
         Log.d("SpeechGate", "Emitting: \"${instruction.text}\"  dir=${instruction.direction}")
 
+        // Snapshot the text at emit time so the compliance log always carries
+        // the exact instruction that triggered the tracking window, even if
+        // lastInstruction changes before the 3 s delay elapses.
+        val emittedText   = instruction.text
+        val emittedAtMs   = now
+
         viewModelScope.launch {
-            _navigationEvents.emit(NavigationEvent.Speak(instruction.text))
+            _navigationEvents.emit(NavigationEvent.Speak(emittedText))
 
             instruction.direction?.let { dir ->
                 navTracker.startTrackingCompliance(dir)
                 delay(3_000L)
-                checkUserCompliance()
+                checkUserCompliance(
+                    instructionText = emittedText,
+                    expectedDir     = dir,
+                    emittedAtMs     = emittedAtMs
+                )
             }
 
             if (instruction.shouldStop) {
@@ -607,7 +702,6 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                 lookingForStairs           = false
                 navTracker.resetDetectionHistory()
                 _navigationEvents.emit(NavigationEvent.StopNavigation)
-                // Auto-save report on arrival
                 saveReport(StopReason.DESTINATION_FOUND)
             }
         }
@@ -617,10 +711,23 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     // Compliance check
     // ─────────────────────────────────────────────────────────────────────────
 
-    private suspend fun checkUserCompliance() {
-        val c = navTracker.checkCompliance() ?: run { navTracker.stopTrackingCompliance(); return }
+    private suspend fun checkUserCompliance(
+        instructionText : String,
+        expectedDir     : Direction,
+        emittedAtMs     : Long
+    ) {
+        val reactionMs   = SystemClock.uptimeMillis() - emittedAtMs
+        val c            = navTracker.checkCompliance()
 
-        if (c.compliant == false && c.confidence > 0.7f) {
+        // null result → tracker had no data; still log it as uncertain
+        val compliant        = c?.compliant
+        val sensorConfidence = c?.confidence ?: 0f
+        val actualDirStr     = c?.actual?.name ?: "UNKNOWN"
+        val expectedDirStr   = expectedDir.name
+
+        var correctionIssued = false
+
+        if (c != null && c.compliant == false && c.confidence > 0.7f) {
             val correction = when {
                 c.expected == Direction.TURN_LEFT  && c.actual == Direction.TURN_RIGHT ->
                     "You turned right. The destination is on the LEFT. Turn around."
@@ -636,7 +743,22 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                     "Please go ${c.expected} instead of ${c.actual}."
             }
             _navigationEvents.emit(NavigationEvent.Speak(correction))
+            correctionIssued = true
         }
+
+        // Always record the outcome — compliant, non-compliant, or uncertain
+        reportManager.recordComplianceResult(
+            instructionText  = instructionText,
+            expectedDir      = expectedDirStr,
+            actualDir        = actualDirStr,
+            compliant        = compliant,
+            sensorConfidence = sensorConfidence,
+            reactionMs       = reactionMs,
+            correctionIssued = correctionIssued
+        )
+
+        Log.d("Compliance", "[$expectedDirStr → $actualDirStr] compliant=$compliant " +
+                "conf=$sensorConfidence corrected=$correctionIssued rxn=${reactionMs}ms")
 
         navTracker.stopTrackingCompliance()
     }
@@ -657,16 +779,14 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
 
         val gap = now - maxOf(lastSignTime, lastSignActivityTime)
 
-        // Each bucket is wider — user stays in it longer before escalating
         val msg = when {
-            gap < 15_000L  -> null   // silent, user is just walking
+            gap < 15_000L  -> null
             gap < 45_000L  -> "No signs visible yet. Keep moving forward and scan the walls."
             gap < 75_000L  -> "Still no signs. Try turning slowly to check both sides."
             gap < 105_000L -> "I haven't found signs in a while. Try retracing your steps to the last sign."
             else           -> "Consider asking someone nearby for directions to $destination."
         } ?: return
 
-        // Don't repeat the same message within 30 seconds
         if (msg == lastTimeoutMessage && now - lastTimeoutGuidanceTime < TIMEOUT_REPEAT_COOLDOWN) return
 
         lastTimeoutMessage = msg
@@ -700,11 +820,14 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     // =========================================================================
     //  HELPERS
     // =========================================================================
+
     private fun mapLabel(label: String) = when (label) {
         "room_direction_left"  -> "directions"
         "room_direction_right" -> "directions"
         "exit_left"            -> "exit direction"
         "exit_right"           -> "exit direction"
+        "exit_down"            -> "exit sign"
+        "door_exit"            -> "exit door"
         "stair_sign"           -> "stair sign"
         else                   -> label
     }
@@ -714,9 +837,14 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
 
     private fun isSignPossibleTarget(label: String): Boolean {
         return when {
-            destination.lowercase() == "exit" -> label in setOf("exit_left", "exit_right", "exit")
-            label == "exit"                   -> true   // always let through — warns user they hit an exit
-            else                              -> label !in setOf("exit_left", "exit_right")
+            // When searching for an exit, only exit-class signs are relevant
+            destinationType == DestinationType.EXIT ->
+                label in setOf("exit_left", "exit_right", "door_exit", "exit_down")
+            // door_exit always passes — when NOT exit-searching it triggers a
+            // "go back, exit ahead" warning so the user doesn't walk into one
+            label == "door_exit" -> true
+            // All other exit-class signs are irrelevant when not exit-searching
+            else -> label !in setOf("exit_left", "exit_right", "door_exit", "exit_down")
         }
     }
 
@@ -741,7 +869,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         val cx = bitmap.width / 2
         return when {
             bbox.right < cx -> "left"
-            bbox.left > cx  -> "right"
+            bbox.left  > cx -> "right"
             else            -> ""
         }
     }
@@ -750,15 +878,12 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         return when (destinationType) {
             DestinationType.STUDY_ROOM -> {
                 val tokens = ocrText.lowercase().split(Regex("[^a-z0-9]+"))
-                // first check if there is a token referring to study / studio
                 val hasStudyKeyword = tokens.any { token ->
                     FuzzyLogic.isMatch(token, "studio") || FuzzyLogic.isMatch(token, "study")
                 }
                 hasStudyKeyword && FuzzyLogic.isMatch(ocrText, destination)
             }
             DestinationType.ROOM -> {
-                // If OCR sees "studio" or "study", this is a study room sign — reject it
-                // even if the room code matches
                 val isStudyRoomSign = ocrText.contains("studio") || ocrText.contains("study")
                 if (isStudyRoomSign) false else FuzzyLogic.isMatch(ocrText, destination)
             }
@@ -792,7 +917,6 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun connect() {
         _connectionStatus.value = ConnectionStatus.CONNECTING
-//        webSocketClient.setSocketUrl("ws://192.168.1.2:8080")
         webSocketClient.setSocketUrl("ws://192.168.0.56:8080")
         webSocketClient.connect()
         webSocketClient.sendMessage("start")
@@ -806,8 +930,6 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun startNavigation(dest: String) {
-        // Always store the destination — even if the stream isn't ready yet.
-        // When STREAM_STARTED fires, applyPendingNavigation() will pick this up.
         pendingDestination = dest
 
         if (!_isNavigationReady.value) {
@@ -817,7 +939,8 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         destinationType = when {
             dest.lowercase().contains("study room") ||
                     dest.lowercase().contains("aula studio") -> DestinationType.STUDY_ROOM
-            dest.lowercase() == "exit"               -> DestinationType.EXIT
+            // Accept "exit", "door_exit", or any user phrasing containing "exit"
+            dest.lowercase().contains("exit")        -> DestinationType.EXIT
             dest.all { it.isDigit() }                -> DestinationType.FLOOR
             else                                     -> DestinationType.ROOM
         }
@@ -825,13 +948,11 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         applyPendingNavigation()
     }
 
-    // Called either immediately from startNavigation (if stream is ready),
-    // or from onMessage when STREAM_STARTED arrives (if startNavigation was called first).
     private fun applyPendingNavigation() {
         if (pendingDestination.isEmpty()) return
 
         destination                = pendingDestination
-        pendingDestination         = ""          // clear so it can't fire twice
+        pendingDestination         = ""
         lastInstruction            = ""
         lastInstructionTime        = 0L
         lastInstructionWasPositive = false
@@ -840,7 +961,6 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         lookingForStairs           = false
         isStopping.set(false)
 
-        // -- LOGGING --//
         reportManager.startSession(destination)
         sessionImageFolder = "Nav_${destination}_${
             java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date())

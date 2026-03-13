@@ -28,8 +28,8 @@ class YoloDetector(
         yolo.setConfidenceThreshold(confidenceThreshold)
 
 
-        val modelPath = "best_float32_v2.tflite"
-        val metadataPath = "metadata_v2.yaml"
+        val modelPath = "best_float32_v3.tflite"
+        val metadataPath = "metadata_V3.yaml"
 //        val modelPath = "yolo11n_float32.tflite"
 //        val metadataPath = "metadata_basemodel.yaml"
 //        val modelPath = "yolo11n_float32_800.tflite"
