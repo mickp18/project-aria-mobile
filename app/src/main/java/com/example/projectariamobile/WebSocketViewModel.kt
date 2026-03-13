@@ -475,28 +475,31 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             val det = Detection(label = label, confidence = confidence, bbox = bbox)
 
             if (requiresText(label)) {
-                val t       = SystemClock.uptimeMillis()
-                // Pass frameTag so OCR-saved images share the same prefix
-                val ocrText = textRecognizer.recognizeTextInBoundingBox(
+                val t = SystemClock.uptimeMillis()
+                // Returns Pair(text, avgElementConfidence)
+                val (ocrText, ocrConfidence) = textRecognizer.recognizeTextInBoundingBox(
                     bitmap,
                     cropRect,
                     label,
                     sessionImageFolder,
-                    frameTag   // ← NEW arg
+                    frameTag
                 )
                 val ocrMs   = SystemClock.uptimeMillis() - t
                 val rawText = ocrText?.lowercase() ?: ""
                 val matched = isDestinationMatch(rawText)
 
-                Log.i("OCR", "[$frameTag] $label → \"$rawText\" matched=$matched in ${ocrMs}ms")
+                Log.i("OCR", "[$frameTag] $label → \"$rawText\" conf=${
+                    if (ocrConfidence >= 0f) String.format("%.2f", ocrConfidence) else "n/a"
+                } matched=$matched in ${ocrMs}ms")
 
                 reportManager.recordOcrResult(
-                    frameId     = frameId,
-                    label       = label,
-                    rawOcrText  = rawText,
-                    matchedDest = matched,
-                    ocrMs       = ocrMs,
-                    dest        = destination
+                    frameId       = frameId,
+                    label         = label,
+                    rawOcrText    = rawText,
+                    matchedDest   = matched,
+                    ocrMs         = ocrMs,
+                    dest          = destination,
+                    ocrConfidence = ocrConfidence
                 )
 
                 if (rawText.isEmpty()) {

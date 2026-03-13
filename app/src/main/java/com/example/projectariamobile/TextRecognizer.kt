@@ -33,6 +33,11 @@ class TextRecognitionProcessor(private val context: Context) {
      * Crops the bitmap, runs OCR, draws bounding boxes on the crop, and saves
      * annotated images.
      *
+     * Returns a [Pair] of:
+     *   - first  : the recognised text (null if nothing found or error)
+     *   - second : average ML Kit element confidence across all recognised tokens
+     *              (0.0–1.0), or -1f when no text was found
+     *
      * All saved filenames are prefixed with [frameTag] (e.g. "F00042") so every
      * image can be matched to its corresponding report entry by searching the
      * report for that tag.
@@ -45,7 +50,7 @@ class TextRecognitionProcessor(private val context: Context) {
         detectionClass : String? = null,
         sessionFolder  : String  = "OCR_Crops",
         frameTag       : String  = "F00000"   // ← NEW param; default safe for call-sites not yet updated
-    ): String? {
+    ): Pair<String?, Float> {            // ← was String?; now (text, avgConfidence)
         return try {
             var scaledBitmap    : Bitmap? = null
             var binarizedBitmap : Bitmap? = null
@@ -63,7 +68,7 @@ class TextRecognitionProcessor(private val context: Context) {
 
             if (croppedBitmap.width < 10 || croppedBitmap.height < 10) {
                 Log.w("TextRecognizer", "Crop too small: ${croppedBitmap.width}x${croppedBitmap.height}, skipping")
-                return null
+                return Pair(null, -1f)
             }
 
             val targetMinSize = 100
@@ -85,8 +90,21 @@ class TextRecognitionProcessor(private val context: Context) {
             if (mlKitTextResult == null || mlKitTextResult.text.isBlank()) {
                 Log.d("TextRecognizer", "[$frameTag] No text found in crop.")
                 if (croppedBitmap != originalBitmap) croppedBitmap.recycle()
-                return null
+                return Pair(null, -1f)
             }
+
+            // ── Compute average element confidence ────────────────────────────
+            // ML Kit exposes confidence at the Element (word/token) level.
+            // We collect every element across all blocks and average them.
+            val allElements = mlKitTextResult.textBlocks
+                .flatMap { it.lines }
+                .flatMap { it.elements }
+            val avgConfidence = if (allElements.isNotEmpty())
+                allElements.map { it.confidence }.average().toFloat()
+            else -1f
+
+            Log.d("TextRecognizer", "[$frameTag] OCR confidence: " +
+                    if (avgConfidence >= 0f) String.format("%.2f", avgConfidence) else "n/a")
 
             val annotatedCrop = drawDetectionResults(croppedBitmap, mlKitTextResult.textBlocks)
 
@@ -102,11 +120,11 @@ class TextRecognitionProcessor(private val context: Context) {
             if (scaledBitmap  != croppedBitmap)  scaledBitmap?.recycle()
             if (binarizedBitmap != scaledBitmap)  binarizedBitmap?.recycle()
 
-            mlKitTextResult.text
+            Pair(mlKitTextResult.text, avgConfidence)
 
         } catch (e: Exception) {
             Log.e("TextRecognizer", "Error recognizing text: ${e.message}", e)
-            null
+            Pair(null, -1f)
         }
     }
 

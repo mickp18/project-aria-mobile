@@ -61,13 +61,14 @@ data class RejectedDetection(
 )
 
 data class OcrResult(
-    val frameId     : Int,         // matches image filename prefix F#####
-    val elapsedMs   : Long,
-    val label       : String,
-    val rawOcrText  : String,
-    val matchedDest : Boolean,
-    val ocrMs       : Long,
-    val destAtTime  : String
+    val frameId       : Int,
+    val elapsedMs     : Long,
+    val label         : String,
+    val rawOcrText    : String,
+    val matchedDest   : Boolean,
+    val ocrMs         : Long,
+    val destAtTime    : String,
+    val ocrConfidence : Float        // avg ML Kit element confidence (0-1); -1 if no text
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -221,21 +222,23 @@ class NavigationReportManager(private val context: Context) {
     }
 
     fun recordOcrResult(
-        frameId     : Int,
-        label       : String,
-        rawOcrText  : String,
-        matchedDest : Boolean,
-        ocrMs       : Long,
-        dest        : String
+        frameId       : Int,
+        label         : String,
+        rawOcrText    : String,
+        matchedDest   : Boolean,
+        ocrMs         : Long,
+        dest          : String,
+        ocrConfidence : Float = -1f
     ) {
         ocrResults.add(OcrResult(
-            frameId     = frameId,
-            elapsedMs   = SystemClock.uptimeMillis() - navigationStartMs,
-            label       = label,
-            rawOcrText  = rawOcrText,
-            matchedDest = matchedDest,
-            ocrMs       = ocrMs,
-            destAtTime  = dest
+            frameId       = frameId,
+            elapsedMs     = SystemClock.uptimeMillis() - navigationStartMs,
+            label         = label,
+            rawOcrText    = rawOcrText,
+            matchedDest   = matchedDest,
+            ocrMs         = ocrMs,
+            destAtTime    = dest,
+            ocrConfidence = ocrConfidence
         ))
     }
 
@@ -478,28 +481,33 @@ class NavigationReportManager(private val context: Context) {
 
             // Per-label summary
             sb.appendLine("  Per-label summary:")
-            sb.appendLine("  ${padR("Label", 24)}  ${padL("Calls",5)}  ${padL("NonEmpty",8)}  ${padL("Matched",7)}  ${padL("AvgMs",6)}")
-            sb.appendLine("  ${"-".repeat(60)}")
+            sb.appendLine("  ${padR("Label", 24)}  ${padL("Calls",5)}  ${padL("NonEmpty",8)}  ${padL("Matched",7)}  ${padL("AvgMs",6)}  ${padL("AvgConf",7)}")
+            sb.appendLine("  ${"-".repeat(68)}")
             ocr.groupBy { it.label }.toSortedMap().forEach { (lbl, hits) ->
-                val ne  = hits.count { it.rawOcrText.isNotEmpty() }
-                val m   = hits.count { it.matchedDest }
-                val avg = hits.map { it.ocrMs }.average()
-                sb.appendLine("  ${padR(lbl, 24)}  ${padL(hits.size.toString(),5)}  ${padL(ne.toString(),8)}  ${padL(m.toString(),7)}  ${padL(fmtDec(avg),6)}")
+                val ne      = hits.count { it.rawOcrText.isNotEmpty() }
+                val m       = hits.count { it.matchedDest }
+                val avgMs   = hits.map { it.ocrMs }.average()
+                val confHits = hits.filter { it.ocrConfidence >= 0f }
+                val avgConf = if (confHits.isNotEmpty()) confHits.map { it.ocrConfidence }.average() else -1.0
+                val confStr = if (avgConf >= 0.0) fmtDec(avgConf) else "n/a"
+                sb.appendLine("  ${padR(lbl, 24)}  ${padL(hits.size.toString(),5)}  ${padL(ne.toString(),8)}  ${padL(m.toString(),7)}  ${padL(fmtDec(avgMs),6)}  ${padL(confStr,7)}")
             }
             sb.appendLine()
 
             // ── Full chronological OCR log — every call with its frameId ─────
             sb.appendLine("  FULL OCR LOG — use FrameTag to find matching images:")
-            sb.appendLine("  ${padR("FrameTag", 9)}  ${padR("Time", 10)}  ${padR("Label", 22)}  ${padL("OcrMs",5)}  ${padR("Dest",10)}  M  Raw OCR text")
-            sb.appendLine("  ${"-".repeat(90)}")
+            sb.appendLine("  ${padR("FrameTag", 9)}  ${padR("Time", 10)}  ${padR("Label", 22)}  ${padL("OcrMs",5)}  ${padL("Conf",5)}  ${padR("Dest",10)}  M  Raw OCR text")
+            sb.appendLine("  ${"-".repeat(100)}")
             ocr.forEach { r ->
-                val matchFlag = if (r.matchedDest) "✓" else "✗"
-                val preview   = r.rawOcrText.take(50).replace("\n", "↵")
+                val matchFlag  = if (r.matchedDest) "✓" else "✗"
+                val preview    = r.rawOcrText.take(50).replace("\n", "↵")
+                val confStr    = if (r.ocrConfidence >= 0f) String.format("%.2f", r.ocrConfidence) else "  n/a"
                 sb.appendLine(
                     "  ${padR(frameTag(r.frameId), 9)}  " +
                             "${padR("+${fmtMs(r.elapsedMs)}", 10)}  " +
                             "${padR(r.label, 22)}  " +
                             "${padL(r.ocrMs.toString(), 5)}  " +
+                            "${padL(confStr, 5)}  " +
                             "${padR(r.destAtTime, 10)}  " +
                             "$matchFlag  \"$preview\""
                 )
