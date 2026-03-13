@@ -23,7 +23,6 @@ class TextRecognitionProcessor(private val context: Context) {
     private val textRecognizer: TextRecognizer =
         TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
 
-    // Paint for the bounding box
     private val rectPaint = Paint().apply {
         color = Color.RED
         style = Paint.Style.STROKE
@@ -31,76 +30,77 @@ class TextRecognitionProcessor(private val context: Context) {
     }
 
     /**
-     * 1. Crops the bitmap.
-     * 2. Runs OCR on the crop.
-     * 3. Draws bounding boxes ON THE CROP.
-     * 4. Saves the annotated CROP.
+     * Crops the bitmap, runs OCR, draws bounding boxes on the crop, and saves
+     * annotated images.
+     *
+     * All saved filenames are prefixed with [frameTag] (e.g. "F00042") so every
+     * image can be matched to its corresponding report entry by searching the
+     * report for that tag.
+     *
+     * @param frameTag  Zero-padded frame identifier from reportManager.frameTag()
      */
     suspend fun recognizeTextInBoundingBox(
-        originalBitmap: Bitmap,
-        boundingBox: Rect,
-        detectionClass: String? = null,
-        sessionFolder: String = "OCR_Crops"
-
+        originalBitmap : Bitmap,
+        boundingBox    : Rect,
+        detectionClass : String? = null,
+        sessionFolder  : String  = "OCR_Crops",
+        frameTag       : String  = "F00000"   // ← NEW param; default safe for call-sites not yet updated
     ): String? {
         return try {
-            // Crop the original image
-            var scaledBitmap: Bitmap? = null
-            var binarizedBitmap: Bitmap? = null
-            var croppedBitmap: Bitmap? = null
-
+            var scaledBitmap    : Bitmap? = null
+            var binarizedBitmap : Bitmap? = null
+            var croppedBitmap   : Bitmap? = null
 
             val validCropRect = validateAndClampBoundingBox(originalBitmap, boundingBox)
-            croppedBitmap = originalBitmap.crop( validCropRect)
-            // store cropped bitmap
-            saveBitmapToGallery(context, croppedBitmap,
-                fileName   = "OCR_raw_${detectionClass}_${System.currentTimeMillis()}.jpg",
-                folderName = sessionFolder)            // scale bitmap if too small
+            croppedBitmap = originalBitmap.crop(validCropRect)
+
+            // Save raw crop — filename carries frameTag for cross-reference
+            saveBitmapToGallery(
+                context, croppedBitmap,
+                fileName   = "${frameTag}_OCR_raw_${detectionClass}_${System.currentTimeMillis()}.jpg",
+                folderName = sessionFolder
+            )
+
+            if (croppedBitmap.width < 10 || croppedBitmap.height < 10) {
+                Log.w("TextRecognizer", "Crop too small: ${croppedBitmap.width}x${croppedBitmap.height}, skipping")
+                return null
+            }
+
             val targetMinSize = 100
             val scaleNeeded = maxOf(
                 if (croppedBitmap.width  < targetMinSize) targetMinSize.toFloat() / croppedBitmap.width  else 1f,
                 if (croppedBitmap.height < targetMinSize) targetMinSize.toFloat() / croppedBitmap.height else 1f
             )
             scaledBitmap = if (scaleNeeded > 1f) croppedBitmap.scaleBitmap(scaleNeeded) else croppedBitmap
-            // In recognizeTextInBoundingBox, after cropping:
-            if (croppedBitmap.width < 10 || croppedBitmap.height < 10) {
-                Log.w("TextRecognizer", "Crop too small to be a real sign: ${croppedBitmap.width}x${croppedBitmap.height}, skipping")
-                return null
-            }
+
             binarizedBitmap = scaledBitmap.binarizeBitmap()
-            saveBitmapToGallery(context, binarizedBitmap,
-                fileName   = "OCR_binarized_${detectionClass}_${System.currentTimeMillis()}.jpg",
-                folderName = sessionFolder)
-            // Run OCR directly on the crop
-           //   val mlKitTextResult = performOCR(binarizedBitmap)
-           val mlKitTextResult = performOCR(croppedBitmap)
+            saveBitmapToGallery(
+                context, binarizedBitmap,
+                fileName   = "${frameTag}_OCR_binarized_${detectionClass}_${System.currentTimeMillis()}.jpg",
+                folderName = sessionFolder
+            )
+
+            val mlKitTextResult = performOCR(croppedBitmap)
 
             if (mlKitTextResult == null || mlKitTextResult.text.isBlank()) {
-                Log.d("TextRecognizer", "No text found in crop.")
-                // Recycle if created
+                Log.d("TextRecognizer", "[$frameTag] No text found in crop.")
                 if (croppedBitmap != originalBitmap) croppedBitmap.recycle()
                 return null
             }
 
-            // Draw results directly onto the cropped bitmap
-            // No offset math needed because ML Kit coordinates match the crop exactly
             val annotatedCrop = drawDetectionResults(croppedBitmap, mlKitTextResult.textBlocks)
 
-            // Save the ANNOTATED CROP
             val className = detectionClass ?: "unknown"
-            // Ensure saveBitmapToGallery is defined in your project
-            val saved = saveBitmapToGallery(context, annotatedCrop,
-                fileName   = "OCR_annotated_${className}_${System.currentTimeMillis()}.jpg",
-                folderName = sessionFolder)
+            val saved = saveBitmapToGallery(
+                context, annotatedCrop,
+                fileName   = "${frameTag}_OCR_annotated_${className}_${System.currentTimeMillis()}.jpg",
+                folderName = sessionFolder
+            )
+            if (saved) Log.i("TextRecognizer", "[$frameTag] Annotated crop saved: $className")
 
-            if (saved) {
-                Log.i("TextRecognizer", "Annotated crop saved: $className")
-            }
-
-            // Clean up
             if (croppedBitmap != originalBitmap) croppedBitmap?.recycle()
-            if (scaledBitmap != croppedBitmap) scaledBitmap?.recycle()
-            if (binarizedBitmap != scaledBitmap) binarizedBitmap?.recycle()
+            if (scaledBitmap  != croppedBitmap)  scaledBitmap?.recycle()
+            if (binarizedBitmap != scaledBitmap)  binarizedBitmap?.recycle()
 
             mlKitTextResult.text
 
@@ -120,46 +120,26 @@ class TextRecognitionProcessor(private val context: Context) {
         }
     }
 
-    /**
-     * Draws bounding boxes onto the provided bitmap.
-     */
-    private fun drawDetectionResults(
-        bitmap: Bitmap,
-        textBlocks: List<Text.TextBlock>
-    ): Bitmap {
-        // Create a mutable copy so we can draw on it
+    private fun drawDetectionResults(bitmap: Bitmap, textBlocks: List<Text.TextBlock>): Bitmap {
         val mutableBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, true)
         val canvas = Canvas(mutableBitmap)
-
         for (block in textBlocks) {
-            val box = block.boundingBox
-            if (box != null) {
-                // Direct drawing: The box coordinates from ML Kit match the bitmap exactly
-                canvas.drawRect(box, rectPaint)
-            }
+            block.boundingBox?.let { canvas.drawRect(it, rectPaint) }
         }
         return mutableBitmap
     }
 
-    // --- Helper Utils --
-
     private fun validateAndClampBoundingBox(bitmap: Bitmap, box: Rect): Rect {
-        val left = box.left.coerceIn(0, bitmap.width - 1)
-        val top = box.top.coerceIn(0, bitmap.height - 1)
-        val right = box.right.coerceIn(left + 1, bitmap.width)
+        val left   = box.left.coerceIn(0, bitmap.width - 1)
+        val top    = box.top.coerceIn(0, bitmap.height - 1)
+        val right  = box.right.coerceIn(left + 1, bitmap.width)
         val bottom = box.bottom.coerceIn(top + 1, bitmap.height)
-
-        if (left >= right || top >= bottom) {
-            return Rect(0,0, bitmap.width, bitmap.height)
-        }
+        if (left >= right || top >= bottom) return Rect(0, 0, bitmap.width, bitmap.height)
         return Rect(left, top, right, bottom)
     }
 
     fun stop() {
-        try {
-            textRecognizer.close()
-        } catch (e: Exception) {
-            Log.e("TextRecognizer", "Error closing: ${e.message}")
-        }
+        try { textRecognizer.close() }
+        catch (e: Exception) { Log.e("TextRecognizer", "Error closing: ${e.message}") }
     }
 }

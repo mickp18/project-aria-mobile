@@ -9,6 +9,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicInteger
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Stop reason
@@ -25,6 +26,7 @@ enum class StopReason {
 // ─────────────────────────────────────────────────────────────────────────────
 
 data class FrameSample(
+    val frameId        : Int,   // stable ID shared with image filenames
     val frameIndex     : Int,
     val yoloMs         : Long,
     val ocrMs          : Long,
@@ -33,16 +35,15 @@ data class FrameSample(
     val droppedBefore  : Int
 )
 
-
 // ─────────────────────────────────────────────────────────────────────────────
-// Rejection reason — one value per disqualification gate in qualifyDetections
+// Rejection reason
 // ─────────────────────────────────────────────────────────────────────────────
 
 enum class RejectionReason {
-    NOT_TARGET,   // isSignPossibleTarget() returned false
-    TOO_SMALL,    // area < PROXIMITY_MIN_AREA_* threshold
-    DISTORTED,    // DistortionChecker flagged it AND confidence < DISTORTION_CONF
-    OCR_EMPTY     // OCR ran but returned empty/null text
+    NOT_TARGET,
+    TOO_SMALL,
+    DISTORTED,
+    OCR_EMPTY
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -50,29 +51,59 @@ enum class RejectionReason {
 // ─────────────────────────────────────────────────────────────────────────────
 
 data class RejectedDetection(
+    val frameId    : Int,         // matches image filename prefix F#####
     val elapsedMs  : Long,
     val label      : String,
-    val confidence : Float,   // YOLO confidence (0–1)
-    val areaPct    : Float,   // bbox area as % of frame — compare to threshold × 100
+    val confidence : Float,
+    val areaPct    : Float,
     val reason     : RejectionReason,
-    val ocrText    : String   // non-empty only for OCR_EMPTY (shows what OCR actually returned)
-)
-data class OcrResult(
-    val elapsedMs   : Long,
-    val label       : String,
-    val rawOcrText  : String,   // exactly what ML Kit returned
-    val matchedDest : Boolean,  // did FuzzyLogic.isMatch() return true?
-    val ocrMs       : Long,
-    val destAtTime  : String    // snapshot of destination at time of OCR call
+    val ocrText    : String
 )
 
-private val ocrResults = CopyOnWriteArrayList<OcrResult>()
+data class OcrResult(
+    val frameId     : Int,         // matches image filename prefix F#####
+    val elapsedMs   : Long,
+    val label       : String,
+    val rawOcrText  : String,
+    val matchedDest : Boolean,
+    val ocrMs       : Long,
+    val destAtTime  : String
+)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Compliance tracking
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Outcome of one compliance check, recorded 3 s after a directional instruction.
+ *
+ * [instructionText]  — the spoken instruction that triggered tracking
+ * [expectedDir]      — the direction the app told the user to take
+ * [actualDir]        — the direction the NavigationTracker measured (null = unknown)
+ * [compliant]        — true/false/null: null means the tracker had no confident reading
+ * [sensorConfidence] — the tracker's confidence value (0–1) at decision time
+ * [reactionMs]       — ms from instruction emit to compliance-check completion
+ * [correctionIssued] — whether a correction instruction was subsequently emitted
+ */
+data class ComplianceEvent(
+    val elapsedMs         : Long,
+    val instructionText   : String,
+    val expectedDir       : String,
+    val actualDir         : String,
+    val compliant         : Boolean?,   // null = tracker had no confident reading
+    val sensorConfidence  : Float,
+    val reactionMs        : Long,
+    val correctionIssued  : Boolean
+)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // NavigationReportManager
 // ─────────────────────────────────────────────────────────────────────────────
 
 class NavigationReportManager(private val context: Context) {
+
+    // ── Frame ID counter — atomic so Dispatchers.Default threads are safe ────
+    private val frameIdCounter = AtomicInteger(0)
 
     // ── Timing samples ───────────────────────────────────────────────────────
     private val frameSamples   = CopyOnWriteArrayList<FrameSample>()
@@ -83,8 +114,10 @@ class NavigationReportManager(private val context: Context) {
     private val qualifiedCounts = mutableMapOf<String, Int>()
     private val instructionLog  = mutableListOf<Pair<Long, String>>()
 
-    // ── Rejection log (thread-safe) ──────────────────────────────────────────
+    // ── OCR + rejection + compliance logs (thread-safe) ─────────────────────
+    private val ocrResults         = CopyOnWriteArrayList<OcrResult>()
     private val rejectedDetections = CopyOnWriteArrayList<RejectedDetection>()
+    private val complianceLog      = CopyOnWriteArrayList<ComplianceEvent>()
 
     // ── Frame counters ───────────────────────────────────────────────────────
     private var totalFramesReceived       = 0
@@ -103,6 +136,22 @@ class NavigationReportManager(private val context: Context) {
     private var timeoutGuidanceCount = 0
 
     // ─────────────────────────────────────────────────────────────────────────
+    // Frame ID API
+    //
+    // Call nextFrameId() ONCE at the very start of processFrame().
+    // Pass the returned Int to every image save and every recordXxx() call for
+    // that frame.  frameTag() gives you the zero-padded string used in filenames.
+    //
+    //   val frameId = reportManager.nextFrameId()
+    //   val tag     = reportManager.frameTag(frameId)   // → "F00042"
+    //   saveBitmapToGallery(..., fileName = "${tag}_YOLO_room_....jpg", ...)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    fun nextFrameId(): Int = frameIdCounter.getAndIncrement()
+
+    fun frameTag(frameId: Int): String = "F%05d".format(frameId)
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Lifecycle
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -113,6 +162,8 @@ class NavigationReportManager(private val context: Context) {
         instructionLog.clear()
         rejectedDetections.clear()
         ocrResults.clear()
+        complianceLog.clear()
+        frameIdCounter.set(0)
         frameIndex                = 0
         totalFramesReceived       = 0
         totalFramesDropped        = 0
@@ -142,7 +193,9 @@ class NavigationReportManager(private val context: Context) {
         }
     }
 
+    /** Call after YOLO + OCR finish for one frame. */
     fun recordFrameProcessed(
+        frameId        : Int,
         yoloMs         : Long,
         ocrMs          : Long,
         totalMs        : Long,
@@ -150,6 +203,7 @@ class NavigationReportManager(private val context: Context) {
     ) {
         frameSamples.add(
             FrameSample(
+                frameId         = frameId,
                 frameIndex      = frameIndex++,
                 yoloMs          = yoloMs,
                 ocrMs           = ocrMs,
@@ -165,10 +219,9 @@ class NavigationReportManager(private val context: Context) {
         detectionCounts[label] = (detectionCounts[label] ?: 0) + 1
         if (qualified) qualifiedCounts[label] = (qualifiedCounts[label] ?: 0) + 1
     }
-    // ── OCR results log ───────────────────────────────────────────────────────
-    private val ocrResults = CopyOnWriteArrayList<OcrResult>()
 
     fun recordOcrResult(
+        frameId     : Int,
         label       : String,
         rawOcrText  : String,
         matchedDest : Boolean,
@@ -176,6 +229,7 @@ class NavigationReportManager(private val context: Context) {
         dest        : String
     ) {
         ocrResults.add(OcrResult(
+            frameId     = frameId,
             elapsedMs   = SystemClock.uptimeMillis() - navigationStartMs,
             label       = label,
             rawOcrText  = rawOcrText,
@@ -185,18 +239,8 @@ class NavigationReportManager(private val context: Context) {
         ))
     }
 
-    /**
-     * Record a detection that was rejected during qualification.
-     * Safe to call from any thread (Dispatchers.Default).
-     *
-     * @param label      YOLO class label
-     * @param confidence YOLO confidence (0–1)
-     * @param bboxArea   bbox.width() * bbox.height()  (pixels²)
-     * @param frameArea  bitmap.width * bitmap.height  (pixels²)
-     * @param reason     which gate rejected it
-     * @param ocrText    pass OCR result if reason == OCR_EMPTY, else leave default ""
-     */
     fun recordRejectedDetection(
+        frameId    : Int,
         label      : String,
         confidence : Float,
         bboxArea   : Float,
@@ -208,6 +252,7 @@ class NavigationReportManager(private val context: Context) {
         val areaPct = if (frameArea > 0f) (bboxArea / frameArea) * 100f else 0f
         rejectedDetections.add(
             RejectedDetection(
+                frameId    = frameId,
                 elapsedMs  = elapsed,
                 label      = label,
                 confidence = confidence,
@@ -223,8 +268,39 @@ class NavigationReportManager(private val context: Context) {
         instructionLog.add(Pair(elapsed, text))
     }
 
-
-
+    /**
+     * Call from checkUserCompliance() after the NavigationTracker returns a result.
+     *
+     * @param instructionText   the spoken instruction that started tracking
+     * @param expectedDir       direction the app instructed (e.g. "TURN_LEFT")
+     * @param actualDir         direction the tracker measured (e.g. "STRAIGHT"), or "UNKNOWN"
+     * @param compliant         tracker's compliant field (true/false/null)
+     * @param sensorConfidence  tracker's confidence value
+     * @param reactionMs        ms elapsed from instruction emit to this check
+     * @param correctionIssued  true if a correction was spoken to the user
+     */
+    fun recordComplianceResult(
+        instructionText  : String,
+        expectedDir      : String,
+        actualDir        : String,
+        compliant        : Boolean?,
+        sensorConfidence : Float,
+        reactionMs       : Long,
+        correctionIssued : Boolean
+    ) {
+        complianceLog.add(
+            ComplianceEvent(
+                elapsedMs        = SystemClock.uptimeMillis() - navigationStartMs,
+                instructionText  = instructionText,
+                expectedDir      = expectedDir,
+                actualDir        = actualDir,
+                compliant        = compliant,
+                sensorConfidence = sensorConfidence,
+                reactionMs       = reactionMs,
+                correctionIssued = correctionIssued
+            )
+        )
+    }
 
     fun recordStaircaseWarning()  { staircaseWarnings++ }
     fun recordStairGuidanceHint() { stairGuidanceHints++ }
@@ -268,6 +344,15 @@ class NavigationReportManager(private val context: Context) {
         sb.appendLine("  Session date  : ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())}")
         sb.appendLine("  Session duration    : ${fmtMs(sessionDurationMs)}")
         sb.appendLine("  Navigation duration : ${fmtMs(navDurationMs)}")
+        sb.appendLine()
+        sb.appendLine("  HOW TO MATCH REPORT ENTRIES TO SAVED IMAGES")
+        sb.appendLine("  ─────────────────────────────────────────────")
+        sb.appendLine("  Every saved image filename starts with a frame tag, e.g.:")
+        sb.appendLine("    F00042_YOLO_room_1234567890.jpg")
+        sb.appendLine("    F00042_OCR_raw_room_1234567890.jpg")
+        sb.appendLine("    F00042_OCR_annotated_room_1234567890.jpg")
+        sb.appendLine("  Search this report for 'F00042' to find every log entry")
+        sb.appendLine("  (YOLO detections, OCR results, rejections) for that frame.")
         sb.appendLine()
 
         // ── Frame throughput ──────────────────────────────────────────────────
@@ -314,6 +399,22 @@ class NavigationReportManager(private val context: Context) {
             sb.appendLine()
         }
 
+        // ── Per-frame YOLO log ─────────────────────────────────────────────────
+        sb.appendLine("── PER-FRAME YOLO LOG ──────────────────────────────────────")
+        sb.appendLine("  ${padR("FrameTag", 9)}  ${padL("YoloMs",7)}  ${padL("OcrMs",6)}  ${padL("TotalMs",8)}  ${padL("Dets",5)}  ${padL("DroppedBefore",13)}")
+        sb.appendLine("  ${"-".repeat(60)}")
+        samples.forEach { s ->
+            sb.appendLine(
+                "  ${padR(frameTag(s.frameId), 9)}  " +
+                        "${padL(s.yoloMs.toString(), 7)}  " +
+                        "${padL(if (s.ocrMs > 0) s.ocrMs.toString() else "-", 6)}  " +
+                        "${padL(s.totalFrameMs.toString(), 8)}  " +
+                        "${padL(s.detectionsCount.toString(), 5)}  " +
+                        "${padL(s.droppedBefore.toString(), 13)}"
+            )
+        }
+        sb.appendLine()
+
         // ── Detection counts ──────────────────────────────────────────────────
         sb.appendLine("── YOLO DETECTIONS PER CLASS ───────────────────────────────")
         sb.appendLine("  ${padR("Label", 24)}  ${padL("Raw", 7)}  ${padL("Qualified", 9)}")
@@ -329,10 +430,8 @@ class NavigationReportManager(private val context: Context) {
             }
         }
         sb.appendLine()
-
         if (samples.isNotEmpty()) {
-            val avgDet = samples.map { it.detectionsCount }.average()
-            sb.appendLine("  Average YOLO detections/frame : ${fmtDec(avgDet)}")
+            sb.appendLine("  Average YOLO detections/frame : ${fmtDec(samples.map { it.detectionsCount }.average())}")
             sb.appendLine()
         }
 
@@ -344,8 +443,7 @@ class NavigationReportManager(private val context: Context) {
         sb.appendLine("  Stair guidance hints    : $stairGuidanceHints")
         sb.appendLine()
 
-        // ── OCR results ───────────────────────────────────────────────────────────
-        // ── OCR results ───────────────────────────────────────────────────────────
+        // ── OCR results ───────────────────────────────────────────────────────
         val ocr = ocrResults.toList()
         sb.appendLine("── OCR RESULTS  (${ocr.size} total calls) ──────────────────────────")
 
@@ -367,11 +465,10 @@ class NavigationReportManager(private val context: Context) {
             sb.appendLine("  Non-matches         : ${missed.size}")
             sb.appendLine()
 
-            // Average latency split by outcome
             if (nonEmpty.isNotEmpty()) {
-                val avgMatchMs  = if (matched.isNotEmpty()) matched.map { it.ocrMs }.average() else 0.0
-                val avgMissMs   = if (missed.isNotEmpty())  missed.map  { it.ocrMs }.average() else 0.0
-                val avgEmptyMs  = if (empty.isNotEmpty())   empty.map   { it.ocrMs }.average() else 0.0
+                val avgMatchMs = if (matched.isNotEmpty()) matched.map { it.ocrMs }.average() else 0.0
+                val avgMissMs  = if (missed.isNotEmpty())  missed.map  { it.ocrMs }.average() else 0.0
+                val avgEmptyMs = if (empty.isNotEmpty())   empty.map   { it.ocrMs }.average() else 0.0
                 sb.appendLine("  Avg OCR latency by outcome:")
                 sb.appendLine("    Match   : ${fmtDec(avgMatchMs)} ms")
                 sb.appendLine("    No-match: ${fmtDec(avgMissMs)} ms")
@@ -379,7 +476,7 @@ class NavigationReportManager(private val context: Context) {
                 sb.appendLine()
             }
 
-            // Per-label breakdown
+            // Per-label summary
             sb.appendLine("  Per-label summary:")
             sb.appendLine("  ${padR("Label", 24)}  ${padL("Calls",5)}  ${padL("NonEmpty",8)}  ${padL("Matched",7)}  ${padL("AvgMs",6)}")
             sb.appendLine("  ${"-".repeat(60)}")
@@ -391,15 +488,33 @@ class NavigationReportManager(private val context: Context) {
             }
             sb.appendLine()
 
-            // Non-match log — the most useful part for manual analysis
-            // Shows exactly what OCR returned vs. what was expected
+            // ── Full chronological OCR log — every call with its frameId ─────
+            sb.appendLine("  FULL OCR LOG — use FrameTag to find matching images:")
+            sb.appendLine("  ${padR("FrameTag", 9)}  ${padR("Time", 10)}  ${padR("Label", 22)}  ${padL("OcrMs",5)}  ${padR("Dest",10)}  M  Raw OCR text")
+            sb.appendLine("  ${"-".repeat(90)}")
+            ocr.forEach { r ->
+                val matchFlag = if (r.matchedDest) "✓" else "✗"
+                val preview   = r.rawOcrText.take(50).replace("\n", "↵")
+                sb.appendLine(
+                    "  ${padR(frameTag(r.frameId), 9)}  " +
+                            "${padR("+${fmtMs(r.elapsedMs)}", 10)}  " +
+                            "${padR(r.label, 22)}  " +
+                            "${padL(r.ocrMs.toString(), 5)}  " +
+                            "${padR(r.destAtTime, 10)}  " +
+                            "$matchFlag  \"$preview\""
+                )
+            }
+            sb.appendLine()
+
+            // Non-match detail
             if (missed.isNotEmpty()) {
-                sb.appendLine("  NON-MATCH detail (OCR returned text but it didn't match destination):")
-                sb.appendLine("  ${padR("Time", 10)}  ${padR("Label", 22)}  ${padR("Dest", 10)}  Raw OCR text")
-                sb.appendLine("  ${"-".repeat(75)}")
+                sb.appendLine("  NON-MATCH DETAIL (OCR returned text but it didn't match destination):")
+                sb.appendLine("  ${padR("FrameTag", 9)}  ${padR("Time", 10)}  ${padR("Label", 22)}  ${padR("Dest", 10)}  Raw OCR text")
+                sb.appendLine("  ${"-".repeat(80)}")
                 missed.forEach { r ->
                     sb.appendLine(
-                        "  ${padR("+${fmtMs(r.elapsedMs)}", 10)}  " +
+                        "  ${padR(frameTag(r.frameId), 9)}  " +
+                                "${padR("+${fmtMs(r.elapsedMs)}", 10)}  " +
                                 "${padR(r.label, 22)}  " +
                                 "${padR(r.destAtTime, 10)}  " +
                                 "\"${r.rawOcrText}\""
@@ -421,7 +536,6 @@ class NavigationReportManager(private val context: Context) {
         if (rejected.isEmpty()) {
             sb.appendLine("  (none)")
         } else {
-            // Summary counts by reason
             val byReason = rejected.groupBy { it.reason }
             sb.appendLine("  By reason:")
             RejectionReason.entries.forEach { r ->
@@ -430,11 +544,9 @@ class NavigationReportManager(private val context: Context) {
             }
             sb.appendLine()
 
-            // Area distribution per label for TOO_SMALL — the most useful data
-            // for deciding whether to lower a threshold.
             val tooSmall = byReason[RejectionReason.TOO_SMALL]
             if (!tooSmall.isNullOrEmpty()) {
-                sb.appendLine("  TOO_SMALL — area% stats per label  (lower threshold if max is close to it):")
+                sb.appendLine("  TOO_SMALL — area% stats per label:")
                 tooSmall.groupBy { it.label }.toSortedMap().forEach { (lbl, hits) ->
                     val areas = hits.map { it.areaPct }.sorted()
                     val p50   = areas[(areas.size * 0.50).toInt().coerceAtMost(areas.size - 1)]
@@ -448,9 +560,10 @@ class NavigationReportManager(private val context: Context) {
                 sb.appendLine()
             }
 
-            // Chronological full log
-            sb.appendLine("  ${padR("Time", 10)}  ${padR("Label", 22)}  ${padL("Conf",5)}  ${padL("Area%",6)}  Reason")
-            sb.appendLine("  ${"-".repeat(75)}")
+            // Full chronological log with frameId
+            sb.appendLine("  FULL REJECTION LOG — use FrameTag to find matching images:")
+            sb.appendLine("  ${padR("FrameTag", 9)}  ${padR("Time", 10)}  ${padR("Label", 22)}  ${padL("Conf",5)}  ${padL("Area%",6)}  Reason")
+            sb.appendLine("  ${"-".repeat(80)}")
             rejected.forEach { d ->
                 val detail = when (d.reason) {
                     RejectionReason.OCR_EMPTY ->
@@ -458,7 +571,8 @@ class NavigationReportManager(private val context: Context) {
                     else -> d.reason.name
                 }
                 sb.appendLine(
-                    "  ${padR("+${fmtMs(d.elapsedMs)}", 10)}  " +
+                    "  ${padR(frameTag(d.frameId), 9)}  " +
+                            "${padR("+${fmtMs(d.elapsedMs)}", 10)}  " +
                             "${padR(d.label, 22)}  " +
                             "${padL(fmtDec(d.confidence.toDouble()), 5)}  " +
                             "${padL(fmtDec(d.areaPct.toDouble()), 6)}  " +
@@ -467,7 +581,6 @@ class NavigationReportManager(private val context: Context) {
             }
         }
         sb.appendLine()
-
 
         // ── Instruction timeline ──────────────────────────────────────────────
         sb.appendLine("── INSTRUCTION TIMELINE ────────────────────────────────────")
@@ -479,6 +592,86 @@ class NavigationReportManager(private val context: Context) {
             }
         }
         sb.appendLine()
+
+        // ── Compliance tracking ───────────────────────────────────────────────
+        val compliance = complianceLog.toList()
+        sb.appendLine("── DIRECTION COMPLIANCE ────────────────────────────────────")
+
+        if (compliance.isEmpty()) {
+            sb.appendLine("  (no directional instructions were emitted this session)")
+        } else {
+            val checked      = compliance.size
+            val compliantN   = compliance.count { it.compliant == true }
+            val nonCompliant = compliance.count { it.compliant == false }
+            val uncertain    = compliance.count { it.compliant == null }
+            val corrections  = compliance.count { it.correctionIssued }
+            val complianceRate = if (checked > 0) compliantN * 100.0 / checked else 0.0
+            val correctionRate = if (nonCompliant > 0) corrections * 100.0 / nonCompliant else 0.0
+            val avgReactionMs  = if (checked > 0) compliance.map { it.reactionMs }.average() else 0.0
+
+            sb.appendLine("  Directional instructions checked : $checked")
+            sb.appendLine("  Compliant                        : $compliantN  (${fmtPct(complianceRate)})")
+            sb.appendLine("  Non-compliant                    : $nonCompliant")
+            sb.appendLine("  Uncertain (low sensor confidence): $uncertain")
+            sb.appendLine("  Corrections issued               : $corrections  (${fmtPct(correctionRate)} of non-compliant)")
+            sb.appendLine("  Avg reaction window              : ${fmtDec(avgReactionMs)} ms")
+            sb.appendLine()
+
+            // Per-direction breakdown
+            sb.appendLine("  Per expected-direction breakdown:")
+            sb.appendLine("  ${padR("Expected", 14)}  ${padL("Checks",6)}  ${padL("OK",4)}  ${padL("FAIL",5)}  ${padL("?",4)}  ${padL("Corrections",11)}")
+            sb.appendLine("  ${"-".repeat(55)}")
+            compliance.groupBy { it.expectedDir }.toSortedMap().forEach { (dir, events) ->
+                val ok   = events.count { it.compliant == true }
+                val fail = events.count { it.compliant == false }
+                val unk  = events.count { it.compliant == null }
+                val cor  = events.count { it.correctionIssued }
+                sb.appendLine(
+                    "  ${padR(dir, 14)}  ${padL(events.size.toString(), 6)}  " +
+                            "${padL(ok.toString(), 4)}  ${padL(fail.toString(), 5)}  " +
+                            "${padL(unk.toString(), 4)}  ${padL(cor.toString(), 11)}"
+                )
+            }
+            sb.appendLine()
+
+            // Confusion matrix: expected vs actual for non-compliant cases only
+            val failed = compliance.filter { it.compliant == false }
+            if (failed.isNotEmpty()) {
+                sb.appendLine("  NON-COMPLIANT DETAIL (expected → actual):")
+                sb.appendLine("  ${padR("Time", 10)}  ${padR("Expected", 14)}  ${padR("Actual", 14)}  ${padL("Conf",5)}  ${padL("RxnMs",6)}  Cor  Instruction")
+                sb.appendLine("  ${"-".repeat(85)}")
+                failed.forEach { e ->
+                    sb.appendLine(
+                        "  ${padR("+${fmtMs(e.elapsedMs)}", 10)}  " +
+                                "${padR(e.expectedDir, 14)}  " +
+                                "${padR(e.actualDir, 14)}  " +
+                                "${padL(fmtDec(e.sensorConfidence.toDouble()), 5)}  " +
+                                "${padL(e.reactionMs.toString(), 6)}  " +
+                                "${if (e.correctionIssued) "YES" else "no "}  " +
+                                "\"${e.instructionText.take(40)}\""
+                    )
+                }
+                sb.appendLine()
+            }
+
+            // Uncertain events — useful to tune the 0.7 confidence threshold
+            val unkEvents = compliance.filter { it.compliant == null }
+            if (unkEvents.isNotEmpty()) {
+                sb.appendLine("  UNCERTAIN CHECKS (sensor confidence below threshold):")
+                sb.appendLine("  ${padR("Time", 10)}  ${padR("Expected", 14)}  ${padR("Actual", 14)}  ${padL("Conf",5)}  Instruction")
+                sb.appendLine("  ${"-".repeat(75)}")
+                unkEvents.forEach { e ->
+                    sb.appendLine(
+                        "  ${padR("+${fmtMs(e.elapsedMs)}", 10)}  " +
+                                "${padR(e.expectedDir, 14)}  " +
+                                "${padR(e.actualDir, 14)}  " +
+                                "${padL(fmtDec(e.sensorConfidence.toDouble()), 5)}  " +
+                                "\"${e.instructionText.take(40)}\""
+                    )
+                }
+                sb.appendLine()
+            }
+        }
 
         sb.appendLine("═══════════════════════════════════════════════════════════")
         sb.appendLine("  END OF REPORT")
@@ -509,8 +702,6 @@ class NavigationReportManager(private val context: Context) {
     }
 
     companion object {
-        // Mirrored from ViewModel so the report can print them without
-        // needing a reference back to the ViewModel.
         private const val PROXIMITY_MIN_AREA_EXIT    = 0.001f
         private const val PROXIMITY_MIN_AREA_ROOMS   = 0.003f
         private const val PROXIMITY_MIN_AREA_OPENING = 0.04f
