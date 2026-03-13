@@ -824,6 +824,16 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     //  HELPERS
     // =========================================================================
 
+    /**
+     * Maps raw YOLO detector labels to user-friendly natural language strings.
+     *
+     * This ensures that when the application provides visual hints or
+     * logs status updates, it uses descriptive terms (e.g., "exit direction")
+     * rather than technical class names (e.g., "exit_left").
+     *
+     * @param label The raw string label returned by the object detection model.
+     * @return A human-readable representation of the detected object category.
+     */
     private fun mapLabel(label: String) = when (label) {
         "room_direction_left"  -> "directions"
         "room_direction_right" -> "directions"
@@ -920,7 +930,8 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun connect() {
         _connectionStatus.value = ConnectionStatus.CONNECTING
-        webSocketClient.setSocketUrl("ws://192.168.0.56:8080")
+//        webSocketClient.setSocketUrl("ws://192.168.0.56:8080")
+        webSocketClient.setSocketUrl("ws://192.168.1.2:8080")
         webSocketClient.connect()
         webSocketClient.sendMessage("start")
     }

@@ -470,8 +470,8 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
             "r two b" -> "r2b"
             "r three b" -> "r3b"
             "r four b"  -> "r4b"
-            "study room r one" -> "study room R1"
-            "study room r two" -> "study room R2"
+            "study room r one" -> "sala studio R1"
+            "study room r two" -> "sala studio R2"
             else -> text.replace(" ", "")
         }
     }
