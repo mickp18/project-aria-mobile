@@ -258,6 +258,11 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             if (results.detections.isEmpty()) {
                 reportManager.recordFrameProcessed(yoloMs, 0L, SystemClock.uptimeMillis() - t0, 0)
                 checkForTimeout()
+                saveBitmapToGallery(
+                    application, bitmap,
+                    fileName   = "YOLO_NO_DETECTION_${System.currentTimeMillis()}.jpg",
+                    folderName = sessionImageFolder
+                )
                 return
             }
 
@@ -787,7 +792,8 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun connect() {
         _connectionStatus.value = ConnectionStatus.CONNECTING
-        webSocketClient.setSocketUrl("ws://192.168.1.2:8080")
+//        webSocketClient.setSocketUrl("ws://192.168.1.2:8080")
+        webSocketClient.setSocketUrl("ws://192.168.0.56:8080")
         webSocketClient.connect()
         webSocketClient.sendMessage("start")
     }
