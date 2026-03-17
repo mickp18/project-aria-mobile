@@ -388,7 +388,8 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
 
                     is NavigationEvent.StopNavigation -> {
                         Log.d("APP", "STOPPING NAVIGATION")
-                        tts.speak("Destination found!", TextToSpeech.QUEUE_FLUSH, null, null)
+
+                        tts.speak("Destination found, ${mapDestinationCommand(webSocketViewModel.destination)}", TextToSpeech.QUEUE_FLUSH, null, null)
                         // Disconnect but do NOT call handleStop here — report already triggered
                         // by emitIfAllowed via saveReport(DESTINATION_FOUND)
                         stopVosk()
@@ -458,6 +459,12 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
     private fun stopVosk() {
         speechService?.stop()
         speechService = null
+    }
+    private fun mapDestinationCommand(dest : String) : String{
+        return when (dest){
+            "exit" -> "Exit reached, you can leave now."
+            else -> "You are in front of $dest"
+        }
     }
 
     private fun mapSpeechToCommand(text: String): String {
