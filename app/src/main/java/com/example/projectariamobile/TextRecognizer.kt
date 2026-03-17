@@ -78,12 +78,12 @@ class TextRecognitionProcessor(private val context: Context) {
             )
             scaledBitmap = if (scaleNeeded > 1f) croppedBitmap.scaleBitmap(scaleNeeded) else croppedBitmap
 
-            binarizedBitmap = scaledBitmap.binarizeBitmap()
-            saveBitmapToGallery(
-                context, binarizedBitmap,
-                fileName   = "${frameTag}_OCR_binarized_${detectionClass}_${System.currentTimeMillis()}.jpg",
-                folderName = sessionFolder
-            )
+//            binarizedBitmap = scaledBitmap.binarizeBitmap()
+//            saveBitmapToGallery(
+//                context, binarizedBitmap,
+//                fileName   = "${frameTag}_OCR_binarized_${detectionClass}_${System.currentTimeMillis()}.jpg",
+//                folderName = sessionFolder
+//            )
 
             val mlKitTextResult = performOCR(croppedBitmap)
 
