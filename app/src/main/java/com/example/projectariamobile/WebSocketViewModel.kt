@@ -365,6 +365,8 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             reportManager.recordStairGuidanceHint()
             val hint = "There are stairs ${directionLabel(direction)}. Use them to reach $destination."
             emitIfAllowed(Instruction(hint, direction = direction))
+            lookingForStairs = false
+
             return
         }
 
@@ -460,9 +462,9 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                 val side      = getSignPosition(bitmap, cropRect)
                 val normLabel = mapLabel(label)
                 val hint = if (side.isNotEmpty())
-                    "There's a $normLabel sign on your $side. Turn to face it for a better reading."
+                    "There's a $normLabel on your $side. Turn to face it for a better reading."
                 else
-                    "There is a $normLabel sign in front."
+                    "There is a $normLabel in front."
 
                 val now = SystemClock.uptimeMillis()
                 if (now - lastSideDetectionTime > SIDE_COOLDOWN) {
@@ -518,7 +520,6 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
 
             if (requiresText(label) && det.text.isEmpty()) {
                 val direction = getSignPosition(bitmap, cropRect)
-                onDisqualified("I can see a sign on the $direction but can't read it yet. Move a bit closer.")
                 continue
             }
 
@@ -557,7 +558,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                     text       = "You've arrived. $destination is right here.",
                     shouldStop = true
                 )
-                else -> Instruction("This isn't $destination. Keep looking.")
+                else -> Instruction("This is not $destination. Keep looking.")
             }
 
             "room_direction_left" -> when {
@@ -567,7 +568,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                     direction = Direction.TURN_LEFT
                 )
                 else -> Instruction(
-                    text      = "$destination isn't on the left. Keep walking.",
+                    text      = "$destination is not on the left. Keep walking.",
                     direction = Direction.STRAIGHT
                 )
             }
@@ -579,7 +580,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                     direction = Direction.TURN_RIGHT
                 )
                 else -> Instruction(
-                    text      = "$destination isn't on the right. Keep walking.",
+                    text      = "$destination is not on the right. Keep walking.",
                     direction = Direction.STRAIGHT
                 )
             }
@@ -609,7 +610,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                         direction = Direction.STRAIGHT
                     )
                 }
-                else -> Instruction("The destination isn't on this floor here. Keep looking.")
+                else -> Instruction("The destination is not on this floor here. Keep looking.")
             }
 
             "staircase" -> null
@@ -741,7 +742,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                 c.expected == Direction.TURN_RIGHT && c.actual == Direction.STRAIGHT ->
                     "You're going straight. Please turn RIGHT."
                 c.expected == Direction.STRAIGHT   && c.actual != Direction.STRAIGHT ->
-                    "Continue STRAIGHT ahead, don't turn."
+                    "Continue STRAIGHT ahead, do not turn."
                 else ->
                     "Please go ${c.expected} instead of ${c.actual}."
             }
@@ -786,7 +787,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             gap < 15_000L  -> null
             gap < 45_000L  -> "No signs visible yet. Keep moving forward and scan the walls."
             gap < 75_000L  -> "Still no signs. Try turning slowly to check both sides."
-            gap < 105_000L -> "I haven't found signs in a while. Try retracing your steps to the last sign."
+            gap < 105_000L -> "I have not found signs in a while. Try retracing your steps to the last sign."
             else           -> "Consider asking someone nearby for directions to $destination."
         } ?: return
 
@@ -824,22 +825,12 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     //  HELPERS
     // =========================================================================
 
-    /**
-     * Maps raw YOLO detector labels to user-friendly natural language strings.
-     *
-     * This ensures that when the application provides visual hints or
-     * logs status updates, it uses descriptive terms (e.g., "exit direction")
-     * rather than technical class names (e.g., "exit_left").
-     *
-     * @param label The raw string label returned by the object detection model.
-     * @return A human-readable representation of the detected object category.
-     */
     private fun mapLabel(label: String) = when (label) {
-        "room_direction_left"  -> "directions"
-        "room_direction_right" -> "directions"
-        "exit_left"            -> "exit direction"
-        "exit_right"           -> "exit direction"
-        "exit_down"            -> "exit sign"
+        "room_direction_left"  -> "directions sign"
+        "room_direction_right" -> "directions sign"
+        "exit_left"            -> "exit direction sign"
+        "exit_right"           -> "exit direction sign"
+        "exit_down"            -> "exit sign sign "
         "door_exit"            -> "exit door"
         "stair_sign"           -> "stair sign"
         else                   -> label
@@ -888,19 +879,35 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private fun isDestinationMatch(ocrText: String): Boolean {
+        // Split into individual lines and trim whitespace/CR so that the extra
+        // "Study Room" (or "Sala Studio R2" repeated) lines on study-room signs
+        // don't pollute the fuzzy comparison for the first line.
+        val lines = ocrText
+            .split("\n", "\r\n", "\r")
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+
         return when (destinationType) {
             DestinationType.STUDY_ROOM -> {
-                val tokens = ocrText.lowercase().split(Regex("[^a-z0-9]+"))
-                val hasStudyKeyword = tokens.any { token ->
-                    FuzzyLogic.isMatch(token, "studio") || FuzzyLogic.isMatch(token, "study")
+                // The sign has two lines: Italian name + English translation.
+                // We need at least one line to contain a study keyword AND at
+                // least one line (could be the same) to fuzzy-match the destination.
+                val hasStudyKeyword = lines.any { line ->
+                    line.contains("studio") || line.contains("study") ||
+                            FuzzyLogic.isMatch(line, "studio") || FuzzyLogic.isMatch(line, "study")
                 }
-                hasStudyKeyword && FuzzyLogic.isMatch(ocrText, destination)
+                hasStudyKeyword && lines.any { line -> FuzzyLogic.isMatch(line, destination) }
             }
             DestinationType.ROOM -> {
-                val isStudyRoomSign = ocrText.contains("studio") || ocrText.contains("study")
-                if (isStudyRoomSign) false else FuzzyLogic.isMatch(ocrText, destination)
+                // Study-room signs must NOT match a plain ROOM search — check every
+                // line so "study room" on a second line still disqualifies the sign.
+                val isStudyRoomSign = lines.any { line ->
+                    line.contains("studio") || line.contains("study")
+                }
+                if (isStudyRoomSign) false
+                else lines.any { line -> FuzzyLogic.isMatch(line, destination) }
             }
-            else -> FuzzyLogic.isMatch(ocrText, destination)
+            else -> lines.any { line -> FuzzyLogic.isMatch(line, destination) }
         }
     }
 
@@ -930,8 +937,8 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun connect() {
         _connectionStatus.value = ConnectionStatus.CONNECTING
-//        webSocketClient.setSocketUrl("ws://192.168.0.56:8080")
-        webSocketClient.setSocketUrl("ws://192.168.1.2:8080")
+        webSocketClient.setSocketUrl("ws://192.168.0.56:8080")
+        //webSocketClient.setSocketUrl("ws://192.168.1.4:8080")
         webSocketClient.connect()
         webSocketClient.sendMessage("start")
     }
