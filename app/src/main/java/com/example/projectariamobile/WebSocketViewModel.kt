@@ -148,6 +148,9 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     // a door visible far down the corridor doesn't falsely trigger "Exit reached."
     private val PROXIMITY_MIN_AREA_DOOR    = 0.06f
     private val DISTORTION_CONF            = 0.65f
+    private val OCR_CONF                   =  0.55f
+    private var lastOcrRetryHintTime = 0L
+    private val OCR_RETRY_COOLDOWN   = 2_000L
     private val TIMEOUT_REPEAT_COOLDOWN    = 30_000L
     private var pendingDestination: String = ""
 
@@ -384,7 +387,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     private suspend fun qualifyDetections(
         raw            : List<ObjectDetection>,
         bitmap         : Bitmap,
-        frameId        : Int,    // ← NEW param — threaded to every record call
+        frameId        : Int,
         onDisqualified : (hint: String) -> Unit
     ): List<Detection> {
 
@@ -521,6 +524,22 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             if (requiresText(label) && det.text.isEmpty()) {
                 val direction = getSignPosition(bitmap, cropRect)
                 continue
+            }
+            if (confidence < OCR_CONF){
+                reportManager.recordRejectedDetection(
+                    frameId    = frameId,
+                    label      = label,
+                    confidence = confidence,
+                    bboxArea   = bboxArea,
+                    frameArea  = frameArea,
+                    reason     = RejectionReason.OCR_LOW_CONFIDENCE
+                )
+                val now = SystemClock.uptimeMillis()
+                if (now - lastOcrRetryHintTime > OCR_RETRY_COOLDOWN) {
+                    lastOcrRetryHintTime = now
+                    onDisqualified("Couldn't read properly the sign, please stay still")
+                }
+
             }
 
             qualified.add(det)

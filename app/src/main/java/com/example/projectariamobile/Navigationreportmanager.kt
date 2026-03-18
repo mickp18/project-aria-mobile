@@ -43,7 +43,8 @@ enum class RejectionReason {
     NOT_TARGET,
     TOO_SMALL,
     DISTORTED,
-    OCR_EMPTY
+    OCR_EMPTY,
+    OCR_LOW_CONFIDENCE
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
