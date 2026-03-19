@@ -120,6 +120,9 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     private var navigationConfidence     = 1.0f
     private var lastSideDetectionTime    = 0L
 
+    private var lastAngleHintTime  = 0L
+    private val ANGLE_HINT_COOLDOWN = 3_000L
+
     // ── Staircase ────────────────────────────────────────────────────────────
     private var lastStairWarningTime   = 0L
     private val STAIR_WARNING_COOLDOWN = 10_000L
@@ -142,8 +145,9 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     private val OLD_SIGN_COOLDOWN          = 10_000L
     private val SIDE_COOLDOWN              = 8_000L
     private val PROXIMITY_MIN_AREA_EXIT    = 0.001f  // exit_left / exit_right arrow signs
-    private val PROXIMITY_MIN_AREA_ROOMS   = 0.001f
-    private val PROXIMITY_MIN_AREA_STAIR   = 0.08f
+    private val PROXIMITY_MIN_AREA_ROOMS   = 0.004f  // ok 0.001
+    private val PROXIMIT_MIN_ROOM_DIRECTIONS = 0.06f // ok 0.001
+    private val PROXIMITY_MIN_AREA_STAIR   = 0.05f
     // door_exit is a full-size door — require it to fill ≥6% of the frame so
     // a door visible far down the corridor doesn't falsely trigger "Exit reached."
     private val PROXIMITY_MIN_AREA_DOOR    = 0.06f
@@ -373,7 +377,16 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             return
         }
 
-        if (area < PROXIMITY_MIN_AREA_STAIR) return
+        if (area < PROXIMITY_MIN_AREA_STAIR)
+            reportManager.recordRejectedDetection(
+                frameId    = frameId,
+                label      = closestStair.category.label,
+                confidence = closestStair.category.confidence,
+                bboxArea   = (closestStair.boundingBox.width() * closestStair.boundingBox.height()).toFloat(),
+                frameArea  = frameArea,
+                reason     = RejectionReason.TOO_SMALL
+            )
+            return
         if (now - lastStairWarningTime < STAIR_WARNING_COOLDOWN) return
         lastStairWarningTime = now
         reportManager.recordStaircaseWarning()
@@ -431,10 +444,12 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             //   door_exit    → PROXIMITY_MIN_AREA_DOOR  (large physical door, must be close)
             //   arrow/down   → PROXIMITY_MIN_AREA_EXIT  (small wall/ceiling signs)
             //   room signs   → PROXIMITY_MIN_AREA_ROOMS
+            //   staircase    → PROXIMITY_MIN_AREA_STAIR (small staircase signs)
             val minArea = when {
                 isDoor                      -> PROXIMITY_MIN_AREA_DOOR
                 isExitArrow || isExitDown   -> PROXIMITY_MIN_AREA_EXIT
-                else                        -> PROXIMITY_MIN_AREA_ROOMS
+                label == "room"             -> PROXIMITY_MIN_AREA_ROOMS
+                else                        -> PROXIMIT_MIN_ROOM_DIRECTIONS
             }
 
             if (area < minArea) {
@@ -519,6 +534,24 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                 }
 
                 det.text = rawText
+            }
+
+            // if room is seen from wrong angle, ignore
+            if (label == "room" && det.text.isNotEmpty() && isGenericRoomLabel(det.text)) {
+                reportManager.recordRejectedDetection(
+                    frameId    = frameId,
+                    label      = label,
+                    confidence = confidence,
+                    bboxArea   = bboxArea,
+                    frameArea  = frameArea,
+                    reason     = RejectionReason.OCR_EMPTY   // reuse closest existing reason
+                )
+                val now = SystemClock.uptimeMillis()
+                if (now - lastAngleHintTime > ANGLE_HINT_COOLDOWN) {
+                    lastAngleHintTime = now
+                    onDisqualified("Try looking at the sign at another angle.")
+                }
+                continue
             }
 
             if (requiresText(label) && det.text.isEmpty()) {
@@ -625,11 +658,11 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                     lookingForStairs  = true
                     lastStairHintTime = 0L
                     Instruction(
-                        text      = "Your destination is on another floor. I'll guide you to the stairs.",
+                        text      = "Your destination is on the next floor. Look around for stairs.",
                         direction = Direction.STRAIGHT
                     )
                 }
-                else -> Instruction("The destination is not on this floor here. Keep looking.")
+                else -> Instruction("Could not manage reading the sign, move closer or change angle.")
             }
 
             "staircase" -> null
@@ -930,6 +963,20 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+
+    private fun isGenericRoomLabel(text: String): Boolean {
+        // Matches OCR results that contain only the generic word "room" or "aula"
+        // (possibly repeated, with punctuation or whitespace) and nothing else
+        // meaningful — e.g. "room", "aula", "room aula", "aula\nroom".
+        val stripped = text
+            .lowercase()
+            .replace(Regex("[^a-z]"), "")   // strip all non-letter chars
+            .replace("aula", "")
+            .replace("room", "")
+            .trim()
+        return stripped.isEmpty() && (text.contains("aula", ignoreCase = true)
+                || text.contains("room", ignoreCase = true))
+    }
     // =========================================================================
     //  STATS
     // =========================================================================
