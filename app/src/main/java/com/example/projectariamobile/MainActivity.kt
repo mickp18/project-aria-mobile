@@ -303,7 +303,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         isWaitingForConfirmation = false
 
         val dataCommand = mapSpeechToCommand(pendingGoal)
-        tts.speak("Confirmed, going to $dataCommand. Connecting.", TextToSpeech.QUEUE_FLUSH, null, null)
+        tts.speak("Confirmed, going to $dataCommand. Connecting to glasses, please wait.", TextToSpeech.QUEUE_FLUSH, null, null)
 
         webSocketViewModel.startNavigation(dataCommand.lowercase())
 
