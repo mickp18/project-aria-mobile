@@ -210,7 +210,10 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
                                     android.os.Handler(android.os.Looper.getMainLooper())
                                         .postDelayed({
                                             if (!tts.isSpeaking) startVoskListening()
-                                        }, 100)
+                                        }, 50)
+                                }
+                                "DEST_FOUND" -> {
+                                    startBackgroundListening()
                                 }
                             }
                         }
@@ -394,7 +397,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
                         // by emitIfAllowed via saveReport(DESTINATION_FOUND)
                         stopVosk()
                         webSocketViewModel.disconnect()
-                        startBackgroundListening()
+                        //startBackgroundListening()
                     }
 
                     is NavigationEvent.ReportReady -> {
