@@ -49,6 +49,8 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
     private val webSocketViewModel: WebSocketViewModel by viewModels()
 
     private var isAwaitingWakeWord = true
+    private var isWaitingForStopConfirmation = false
+
 
     // Permission handler
     private val requestPermissionLauncher = registerForActivityResult(
@@ -199,7 +201,24 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
     private fun setupTTS() {
         tts = TextToSpeech(this) { status ->
             if (status == TextToSpeech.SUCCESS) {
-                tts.language = Locale.US
+                tts.language = Locale.UK
+                val preferredNames = listOf(
+                    "en-us-x-tpf-network",
+                    "en-us-x-tpc-network",
+                    "en-us-x-iom-network",
+                    "en-us-x-tpf-local"   // fallback if offline
+                )
+
+                val chosen = preferredNames
+                    .firstNotNullOfOrNull { name -> tts.voices?.find { it.name == name } }
+
+                if (chosen != null) {
+                    tts.voice = chosen
+                    Log.d("TTS", "Using voice: ${chosen.name}")
+                } else {
+                    Log.w("TTS", "None of the preferred voices found, using default")
+                }
+
                 tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                     override fun onStart(p0: String?) {}
                     override fun onError(p0: String?) {}
@@ -208,13 +227,14 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
                             when (utteranceId) {
                                 "GOAL_PROMPT", "CONFIRM_PROMPT" -> {
                                     android.os.Handler(android.os.Looper.getMainLooper())
-                                        .postDelayed({
-                                            if (!tts.isSpeaking) startVoskListening()
-                                        }, 50)
+                                        .postDelayed({ if (!tts.isSpeaking) startVoskListening() }, 100)
                                 }
-                                "DEST_FOUND" -> {
-                                    startBackgroundListening()
+                                "STOP_CONFIRM_PROMPT" -> {
+                                    // Listen for yes/no to confirm the stop
+                                    isWaitingForConfirmation = true  // reuse existing flag so handleYesNoResponse is called
+                                    startVoskListening()
                                 }
+                                "DEST_FOUND", "MANUAL_STOP" -> startBackgroundListening()
                             }
                         }
                     }
@@ -236,7 +256,9 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         if (text == "cancel") { stopVosk(); startBackgroundListening(); return }
 
         if (text == "stop" && webSocketViewModel.isSocketConnected.value) {
-            handleStop(StopReason.MANUAL_STOP)
+            stopVosk()
+            isWaitingForStopConfirmation = true
+            tts.speak("Did you say stop navigation?", TextToSpeech.QUEUE_FLUSH, null, "STOP_CONFIRM_PROMPT")
             return
         }
 
@@ -274,28 +296,33 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
             .create()
 
         confirmationDialog?.show()
+        //tts.voices?.forEach { Log.d("TTS", "${it.name} | quality=${it.quality} | network=${it.isNetworkConnectionRequired}") }
+
         tts.speak("You said $goal. Is this correct?", TextToSpeech.QUEUE_FLUSH, null, "CONFIRM_PROMPT")
     }
 
     private fun handleYesNoResponse(response: String) {
         val clean = response.lowercase()
+
+        if (isWaitingForStopConfirmation) {
+            isWaitingForStopConfirmation = false
+            when {
+                clean.contains("yes") -> handleStop(StopReason.MANUAL_STOP)
+                else -> {
+                    tts.speak("Resuming navigation.", TextToSpeech.QUEUE_FLUSH, null, null)
+                    startBackgroundListening()
+                }
+            }
+            return
+        }
+
         when {
-            clean.contains("yes") -> {
-                confirmationDialog?.dismiss()
-                finalizeGoal()
-            }
-            clean.contains("no") -> {
-                confirmationDialog?.dismiss()
-                startVoiceCapture()
-            }
+            clean.contains("yes") -> { confirmationDialog?.dismiss(); finalizeGoal() }
+            clean.contains("no")  -> { confirmationDialog?.dismiss(); startVoiceCapture() }
             clean.contains("cancel") || (clean.contains("stop") && !tts.isSpeaking) -> {
-                confirmationDialog?.dismiss()
-                resetVoiceFlow()
+                confirmationDialog?.dismiss(); resetVoiceFlow()
             }
-            else -> tts.speak(
-                "Please say yes, no, or cancel.",
-                TextToSpeech.QUEUE_FLUSH, null, "CONFIRM_PROMPT"
-            )
+            else -> tts.speak("Please say yes, no, or cancel.", TextToSpeech.QUEUE_FLUSH, null, "CONFIRM_PROMPT")
         }
     }
 
@@ -392,7 +419,10 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
                     is NavigationEvent.StopNavigation -> {
                         Log.d("APP", "STOPPING NAVIGATION")
 
-                        tts.speak("Destination found, ${mapDestinationCommand(webSocketViewModel.destination)}", TextToSpeech.QUEUE_FLUSH, null, null)
+                        tts.speak(
+                            "Destination found, ${mapDestinationCommand(webSocketViewModel.destination)}",
+                            TextToSpeech.QUEUE_FLUSH, null, "DEST_FOUND"
+                        )
                         // Disconnect but do NOT call handleStop here — report already triggered
                         // by emitIfAllowed via saveReport(DESTINATION_FOUND)
                         stopVosk()
@@ -422,13 +452,12 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
      */
     private fun handleStop(reason: StopReason = StopReason.MANUAL_STOP) {
         stopVosk()
-        // Only save explicitly on manual stop; arrival saves its own report
         if (reason == StopReason.MANUAL_STOP) {
             webSocketViewModel.saveReport(StopReason.MANUAL_STOP)
         }
         webSocketViewModel.disconnect()
-        tts.speak("Disconnected, stopping.", TextToSpeech.QUEUE_ADD, null, null)
-        startBackgroundListening()
+        tts.speak("Disconnected, stopping.", TextToSpeech.QUEUE_FLUSH, null, "MANUAL_STOP")
+        // startBackgroundListening() moved to onDone
     }
 
     private fun showReportSavedDialog(filePath: String) {
