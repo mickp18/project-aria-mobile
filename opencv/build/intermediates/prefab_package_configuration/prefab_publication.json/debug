@@ -1,0 +1,26 @@
+{
+  "installationFolder": "/home/mick/AndroidStudioProjects/projectariamobile/opencv/build/intermediates/prefab_package/debug/prefab",
+  "gradlePath": ":opencv",
+  "packageInfo": {
+    "packageName": "opencv",
+    "packageSchemaVersion": 2,
+    "packageDependencies": [],
+    "modules": [
+      {
+        "moduleName": "opencv_jni_shared",
+        "moduleHeaders": "/home/mick/AndroidStudioProjects/projectariamobile/opencv/native/jni/include",
+        "moduleExportLibraries": [],
+        "abis": [
+          {
+            "abiName": "arm64-v8a",
+            "abiApi": 21,
+            "abiNdkMajor": 27,
+            "abiStl": "c++_shared",
+            "abiLibrary": "/home/mick/AndroidStudioProjects/projectariamobile/opencv/.cxx/Debug/o6d5e2d3/arm64-v8a/libopencv_jni_shared.a",
+            "abiAndroidGradleBuildJsonFile": "/home/mick/AndroidStudioProjects/projectariamobile/opencv/.cxx/Debug/o6d5e2d3/arm64-v8a/android_gradle_build.json"
+          }
+        ]
+      }
+    ]
+  }
+}

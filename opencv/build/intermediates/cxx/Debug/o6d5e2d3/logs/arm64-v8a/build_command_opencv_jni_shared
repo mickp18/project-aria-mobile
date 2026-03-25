@@ -1,0 +1,4 @@
+/home/mick/Android/Sdk/cmake/3.22.1/bin/ninja \
+  -C \
+  /home/mick/AndroidStudioProjects/projectariamobile/opencv/.cxx/Debug/o6d5e2d3/arm64-v8a \
+  opencv_jni_shared
