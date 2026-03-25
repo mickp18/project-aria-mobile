@@ -145,8 +145,8 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     private val OLD_SIGN_COOLDOWN          = 10_000L
     private val SIDE_COOLDOWN              = 8_000L
     private val PROXIMITY_MIN_AREA_EXIT    = 0.001f  // exit_left / exit_right arrow signs
-    private val PROXIMITY_MIN_AREA_ROOMS   = 0.004f  // ok 0.001
-    private val PROXIMIT_MIN_ROOM_DIRECTIONS = 0.06f // ok 0.001
+    private val PROXIMITY_MIN_AREA_ROOMS   = 0.001f  // ok 0.001
+    private val PROXIMIT_MIN_ROOM_DIRECTIONS = 0.01f // ok 0.001
     private val PROXIMITY_MIN_AREA_STAIR   = 0.05f
     // door_exit is a full-size door — require it to fill ≥6% of the frame so
     // a door visible far down the corridor doesn't falsely trigger "Exit reached."
@@ -1003,8 +1003,8 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun connect() {
         _connectionStatus.value = ConnectionStatus.CONNECTING
-        webSocketClient.setSocketUrl("ws://192.168.0.56:8080")
-        //webSocketClient.setSocketUrl("ws://192.168.1.4:8080")
+        //webSocketClient.setSocketUrl("ws://192.168.0.56:8080")
+        webSocketClient.setSocketUrl("ws://192.168.1.2:8080")
         webSocketClient.connect()
         webSocketClient.sendMessage("start")
     }
