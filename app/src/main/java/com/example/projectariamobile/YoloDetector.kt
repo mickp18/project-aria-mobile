@@ -1,4 +1,4 @@
-package com.example.tutorial
+package com.example.projectariamobile
 
 import android.content.Context
 import android.graphics.Bitmap
@@ -7,13 +7,12 @@ import com.ultralytics.yolo.ImageProcessing
 import com.ultralytics.yolo.models.LocalYoloModel
 import com.ultralytics.yolo.predict.detect.DetectedObject
 import com.ultralytics.yolo.predict.detect.TfliteDetector
-import org.tensorflow.lite.support.image.TensorImage
 
 
 class YoloDetector(
     var confidenceThreshold: Float = 0.5f,
     var iouThreshold: Float = 0.3f,
-    var numThreads: Int = 2,
+    var numThreads: Int = 4,
     var maxResults: Int = 3,
     var currentDelegate: Int = 0,
     val context: Context
@@ -28,11 +27,14 @@ class YoloDetector(
         yolo.setIouThreshold(iouThreshold)
         yolo.setConfidenceThreshold(confidenceThreshold)
 
-        // val modelPath = "YOLO11n-catsdogs_float32.tflite"
-        // val metadataPath = "metadata-catsdogs.yaml"
-        val modelPath = "yolo11n_float32.tflite"
-//        val metadataPath = "metadata_int8.yaml"
-        val metadataPath = "metadata.yaml"
+
+        val modelPath = "best_float32_v3.tflite"
+        val metadataPath = "metadata_V3.yaml"
+//        val modelPath = "yolo11n_float32.tflite"
+//        val metadataPath = "metadata_basemodel.yaml"
+//        val modelPath = "yolo11n_float32_800.tflite"
+//        val metadataPath = "metadata_basemodel800.yaml"
+
 
         val config = LocalYoloModel(
             "detect",
@@ -62,17 +64,19 @@ class YoloDetector(
 
         // ASPECT_RATIO = 4:3
         // => imgW = imgH * 3/4
-        var imgH: Int
-        var imgW: Int
-        if (imageRotation == 90 || imageRotation == 270) {
-            imgH = ppImage.height
-            imgW = imgH * 3 / 4
-        }
-        else {
-            imgW = ppImage.width
-            imgH = imgW * 3 / 4
-
-        }
+//        var imgH: Int
+//        var imgW: Int
+//        if (imageRotation == 90 || imageRotation == 270) {
+//            imgH = ppImage.height
+//            imgW = imgH * 3 / 4
+//        }
+//        else {
+//            imgW = ppImage.width
+//            imgH = imgW * 3 / 4
+//
+//        }
+        val originalWidth = image.width.toFloat()
+        val originalHeight = image.height.toFloat()
 
 
         for (result: DetectedObject in results) {
@@ -82,10 +86,14 @@ class YoloDetector(
             )
             val yoloBox = result.boundingBox
 
-            val left = yoloBox.left * imgW
-            val top = yoloBox.top * imgH
-            val right = yoloBox.right * imgW
-            val bottom = yoloBox.bottom * imgH
+//            val left = yoloBox.left * imgW
+//            val top = yoloBox.top * imgH
+//            val right = yoloBox.right * imgW
+//            val bottom = yoloBox.bottom * imgH
+            val left = yoloBox.left * originalWidth
+            val top = yoloBox.top * originalHeight
+            val right = yoloBox.right * originalWidth
+            val bottom = yoloBox.bottom * originalHeight
 
             val bbox = RectF(
                 left,
@@ -101,7 +109,7 @@ class YoloDetector(
         }
 
         val ret = DetectionResult(ppImage, detections)
-        ret.info = yolo.stats
+//        ret.info = yolo.stats
         return ret
 
     }

@@ -1,8 +1,8 @@
-package com.example.tutorial
+package com.example.projectariamobile
 
 import android.graphics.Bitmap
 import android.graphics.RectF
-import org.tensorflow.lite.support.image.TensorImage
+import com.ultralytics.yolo.predict.detect.TfliteDetector
 
 class Category (
     val label: String,
@@ -17,7 +17,7 @@ class ObjectDetection(
 class DetectionResult(
     val image: Bitmap,
     val detections: List<ObjectDetection>,
-    var info: Any?=null
+    var info: TfliteDetector.Stats?=null
 )
 
 interface ObjectDetector {

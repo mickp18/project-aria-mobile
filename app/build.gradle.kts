@@ -1,11 +1,13 @@
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
+
 }
 
 android {
-    namespace = "com.example.tutorial"
+    namespace = "com.example.projectariamobile"
     compileSdk = 36
+
 
     defaultConfig {
         applicationId = "com.example.tutorial"
@@ -22,6 +24,11 @@ android {
             abiFilters.add("x86_64")
         }
     }
+//    @Suppress("UnstableApiUsage")
+//    androidResources {
+//        // We include "uuid" and "" (empty extension) to be safe
+//        noCompress.addAll(listOf("tflite", "bundle", "pb", "am", "conf", "graph", "ivector", "uuid", ""))
+//    }
 
     buildTypes {
         release {
@@ -79,4 +86,19 @@ dependencies {
     // Google MLKit
     implementation("com.google.mlkit:text-recognition:16.0.1")
     implementation("org.yaml:snakeyaml:2.0")
+// Kotlin Coroutines
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+
+    // Google Play Services Tasks (for ML Kit await())
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.7.3")
+
+    // Lifecycle ViewModel with coroutines support
+    implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.6.2")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.6.2")
+
+    implementation("com.alphacephei:vosk-android:0.3.47")
+
+    implementation(project(":opencv"))
 }
+

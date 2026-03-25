@@ -19,5 +19,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "tutorial"
+rootProject.name = "projectariamobile"
 include(":app")
+include(":opencv")
